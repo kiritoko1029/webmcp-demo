@@ -1,0 +1,370 @@
+import React, { useEffect, useState } from 'react';
+import {
+  BatteryCharging,
+  Bike,
+  BookOpen,
+  Box,
+  Check,
+  Clock,
+  FileText,
+  Globe2,
+  Layers,
+  Map,
+  RefreshCw,
+  RotateCcw,
+  Share2,
+  ShieldCheck,
+  ShoppingBag,
+  Trophy,
+  Wallet,
+} from 'lucide-react';
+import { ApprovalGateModal } from './components/ApprovalGateModal';
+import { CityMapModule } from './components/CityMapModule';
+import { DeclarativeFormsModule } from './components/DeclarativeFormsModule';
+import { RiderDispatchModule } from './components/RiderDispatchModule';
+import { SpecGuideModule } from './components/SpecGuideModule';
+import { WebMCPConsoleDock } from './components/WebMCPConsoleDock';
+import {
+  computeArenaRank,
+  computeUsedBoxSlots,
+  formatShiftClock,
+  nexusStore,
+  useNexusStore,
+} from './store/nexusStore';
+import type { ActiveModule } from './types/domain';
+import { useWebMCPBridge } from './webmcp/useWebMCPBridge';
+import { importWorldFromSeedOrUrl } from './webmcp/worldDirector';
+import { buildShareableWorldUrl } from './webmcp/worldSeedCodec';
+
+const NAV_TABS: Array<{
+  id: ActiveModule;
+  label: string;
+  badge?: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'dispatch', label: '生存接单与装备台', badge: '8 Tools', icon: ShoppingBag },
+  { id: 'map', label: '动态地形沙盘地图', badge: '物理+危险区', icon: Map },
+  { id: 'forms', label: '卡餐报备与提现', badge: '2 <form>', icon: FileText },
+  { id: 'comms', label: '智能外卖柜与隐私号', badge: '3 Iframe', icon: Box },
+  { id: 'spec', label: 'WebMCP 游戏说明', icon: BookOpen },
+];
+
+export const App: React.FC = () => {
+  const { tools, runtimeMode, refreshTools } = useWebMCPBridge();
+  const [openDualModalTick, setOpenDualModalTick] = useState(0);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [seedBannerToast, setSeedBannerToast] = useState<string | null>(null);
+
+  const activeModule = useNexusStore((s) => s.activeModule);
+  const toolScopeMode = useNexusStore((s) => s.toolScopeMode);
+  const autoApprove = useNexusStore((s) => s.autoApproveConsequential);
+  const worldMap = useNexusStore((s) => s.worldMap);
+  const rider = useNexusStore((s) => s.rider);
+  const shift = useNexusStore((s) => s.shift);
+  const orders = useNexusStore((s) => s.orders);
+  const formAwaitingHuman = useNexusStore((s) => s.declarativeFormStatus.awaitingHumanSubmit);
+
+  // Auto-load shared world seed when opening a `#world=...` or `?world=...` URL!
+  useEffect(() => {
+    const tryLoadUrlSeed = async () => {
+      const hash = window.location.hash;
+      const search = window.location.search;
+      const hasWorldParam =
+        hash.includes('world=') ||
+        hash.includes('seed=') ||
+        search.includes('world=') ||
+        search.includes('seed=');
+      if (!hasWorldParam) return;
+      try {
+        const res = await importWorldFromSeedOrUrl(window.location.href, {
+          syncUrlHash: false,
+        });
+        setSeedBannerToast(
+          `已从分享链接载入同款世界 [${res.seedId}] · 「${res.themeName}」(${res.orderCount}笔初始单)`,
+        );
+        window.setTimeout(() => setSeedBannerToast(null), 5500);
+      } catch (err) {
+        console.warn('[WorldSeed] Failed to import URL seed:', err);
+      }
+    };
+
+    void tryLoadUrlSeed();
+    const onHashChange = () => {
+      void tryLoadUrlSeed();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  const handleCopyShareWorldUrl = async () => {
+    try {
+      const { url, token } = await buildShareableWorldUrl(worldMap, orders);
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${window.location.search}#world=${token}`,
+      );
+      await navigator.clipboard.writeText(url);
+      setShareCopied(true);
+      setSeedBannerToast(`已复制世界种子 [${worldMap.seedId}] 分享链接！好友打开链接即可游玩同款地图与订单`);
+      window.setTimeout(() => setShareCopied(false), 2600);
+      window.setTimeout(() => setSeedBannerToast(null), 4500);
+    } catch {
+      // Fallback if clipboard API restricted
+      const { token } = await buildShareableWorldUrl(worldMap, orders);
+      window.location.hash = `world=${token}`;
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 2600);
+    }
+  };
+
+  const usedSlots = computeUsedBoxSlots(orders);
+  const poolCount = orders.filter((o) => o.stage === 'pool').length;
+  const rank = computeArenaRank(shift.arenaScore);
+  const clockLabel = formatShiftClock(shift.elapsedMinutes);
+  const minsRemaining = Math.max(0, shift.totalShiftMinutes - shift.elapsedMinutes);
+
+  return (
+    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 md:h-dvh md:overflow-hidden">
+      {/* Top Arena Game HUD Header */}
+      <header className="shrink-0 border-b border-slate-800/90 bg-slate-950/95 backdrop-blur">
+        {seedBannerToast && (
+          <div className="border-b border-emerald-500/30 bg-emerald-950/60 px-4 py-1.5 text-center text-xs font-medium text-emerald-200">
+            🌱 {seedBannerToast}
+          </div>
+        )}
+        <div className="mx-auto flex max-w-[1680px] flex-wrap items-center justify-between gap-3 px-4 py-2.5 lg:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/20">
+              <Bike className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-base font-bold tracking-tight text-white">
+                  闪电骑士：AI 外卖生存挑战赛 (WebMCP LLM Arena)
+                </h1>
+                <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 font-mono text-[11px] font-semibold text-amber-300">
+                  {tools.length} WebMCP Tools
+                </span>
+                <span className="rounded-full border border-indigo-500/40 bg-indigo-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-300">
+                  Seed: {worldMap.seedId}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                双大模型架构：<strong className="text-indigo-300">世界导演模型</strong> 生成可共享种子地图/商家/悬赏单 ·{' '}
+                <strong className="text-amber-300">外卖员玩家模型</strong> 通过 WebMCP 决策闯关
+              </p>
+            </div>
+          </div>
+
+          {/* Top Controls */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <button
+              type="button"
+              onClick={() => setOpenDualModalTick((n) => n + 1)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/25 px-3 py-1.5 font-semibold text-indigo-200 hover:bg-indigo-600/40"
+            >
+              <Globe2 className="h-3.5 w-3.5 text-indigo-300" />
+              世界导演 &amp; 种子/模型
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleCopyShareWorldUrl()}
+              title="将当前世界导演生成的地图、危险区、商家与初始悬赏订单编码为可分享链接"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-2.5 py-1.5 font-semibold text-emerald-200 hover:bg-emerald-500/25"
+            >
+              {shareCopied ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-emerald-300" />
+                  已复制种子链接
+                </>
+              ) : (
+                <>
+                  <Share2 className="h-3.5 w-3.5 text-emerald-300" />
+                  分享世界种子
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                nexusStore.patch({
+                  toolScopeMode: toolScopeMode === 'global' ? 'view-scoped' : 'global',
+                })
+              }
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 font-medium ${
+                toolScopeMode === 'view-scoped'
+                  ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
+                  : 'border-slate-700 bg-slate-900 text-slate-300'
+              }`}
+            >
+              <Layers className="h-3.5 w-3.5 text-amber-400" />
+              {toolScopeMode === 'global' ? '全量工具' : '按页动态'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => nexusStore.patch({ autoApproveConsequential: !autoApprove })}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 font-medium ${
+                !autoApprove
+                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                  : 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
+              }`}
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+              {!autoApprove ? '弃单门禁开启' : '免确认模式'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => nexusStore.replayCurrentWorldSeed()}
+              title="保持当前世界种子与初始订单不变，重置时间到 11:00 供不同外卖员模型公平打榜"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-medium text-indigo-300 hover:border-indigo-500/50 hover:text-indigo-200"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              同种子重开
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                nexusStore.resetEnvironment();
+                if (window.location.hash.includes('world=')) {
+                  window.history.replaceState(
+                    null,
+                    '',
+                    `${window.location.pathname}${window.location.search}`,
+                  );
+                }
+              }}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-medium text-slate-300 hover:text-white"
+            >
+              <RotateCcw className="h-3.5 w-3.5 text-slate-400" />
+              默认初始局
+            </button>
+          </div>
+        </div>
+
+        {/* 5 Survival Game HUD Strips + Nav */}
+        <div className="mx-auto max-w-[1680px] px-4 pb-2.5 lg:px-6">
+          <div className="mb-2.5 grid grid-cols-2 gap-2 xl:grid-cols-5">
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/70 px-3 py-1.5 text-xs">
+              <span className="shrink-0 text-slate-400">班次时钟</span>
+              <span className="flex items-center gap-1 whitespace-nowrap font-mono text-sm font-bold text-white">
+                <Clock className="h-3.5 w-3.5 text-amber-400" />
+                {clockLabel} (剩{minsRemaining}分)
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/70 px-3 py-1.5 text-xs">
+              <span className="shrink-0 text-slate-400">竞技段位</span>
+              <span className={`flex items-center gap-1 whitespace-nowrap font-mono text-sm font-bold ${rank.colorClass}`}>
+                <Trophy className="h-3.5 w-3.5" />
+                {shift.arenaScore}分 · {rider.comboStreak}连击
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/70 px-3 py-1.5 text-xs">
+              <span className="shrink-0 text-slate-400">配送箱格数</span>
+              <span className="whitespace-nowrap font-mono text-sm font-bold text-amber-300">
+                {usedSlots}/{rider.maxBoxSlots}格 (池{poolCount}单)
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/70 px-3 py-1.5 text-xs">
+              <span className="shrink-0 text-slate-400">可用资金</span>
+              <span className="flex items-center gap-1 whitespace-nowrap font-mono text-sm font-bold text-emerald-400">
+                <Wallet className="h-3.5 w-3.5" />¥{rider.walletYuan.toFixed(2)}
+              </span>
+            </div>
+
+            <div className="col-span-2 flex items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-900/70 px-3 py-1.5 text-xs xl:col-span-1">
+              <span className="shrink-0 text-slate-400">电量 / 体力</span>
+              <span className="flex items-center gap-1 whitespace-nowrap font-mono text-sm font-bold text-sky-300">
+                <BatteryCharging className="h-3.5 w-3.5" />
+                电{rider.batteryPct}% · 体{rider.staminaPct}%
+              </span>
+            </div>
+          </div>
+
+          <nav className="flex flex-wrap items-center gap-1.5">
+            {NAV_TABS.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeModule === item.id;
+              const pulseForms = item.id === 'forms' && formAwaitingHuman;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => nexusStore.patch({ activeModule: item.id })}
+                  className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-bold transition ${
+                    pulseForms
+                      ? 'animate-pulse bg-amber-400 text-slate-950 shadow-md'
+                      : isActive
+                        ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                        : 'bg-slate-900/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  <span>{item.label}</span>
+                  {item.badge && (
+                    <span
+                      className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] ${
+                        pulseForms || isActive
+                          ? 'bg-slate-950/20 text-slate-950'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      </header>
+
+      {/* Main Split Arena */}
+      <main className="mx-auto grid w-full max-w-[1680px] flex-1 min-h-0 grid-cols-1 gap-4 px-4 py-3.5 md:grid-cols-12 md:overflow-hidden lg:px-6">
+        <section className="min-w-0 min-h-0 overscroll-contain md:col-span-7 md:h-full md:overflow-y-auto md:pr-1.5 lg:col-span-8">
+          {activeModule === 'dispatch' && <RiderDispatchModule />}
+          {activeModule === 'map' && <CityMapModule />}
+          {activeModule === 'spec' && <SpecGuideModule />}
+
+          <DeclarativeFormsModule hidden={activeModule !== 'forms'} />
+
+          <div className={activeModule === 'comms' ? 'space-y-3' : 'hidden'}>
+            <div className="rounded-xl border border-amber-500/30 bg-slate-900/90 p-3.5 text-xs text-slate-300">
+              下方运行在独立 <code className="text-amber-300">&lt;iframe src=&quot;./rider-comms-frame.html&quot; allow=&quot;tools&quot;&gt;</code>{' '}
+              中的虚拟隐私号与智能外卖柜终端，外卖员 AI 通过 <code className="text-amber-300">document.modelContext</code>{' '}
+              跨帧开柜存餐并通知顾客。
+            </div>
+            <iframe
+              src="./rider-comms-frame.html"
+              title="Rider Privacy Comms & Smart Locker"
+              allow="tools"
+              onLoad={refreshTools}
+              className="h-[510px] w-full rounded-xl border border-slate-800 bg-slate-950"
+            />
+          </div>
+        </section>
+
+        <section className="h-[620px] min-h-0 overscroll-contain md:col-span-5 md:h-full md:overflow-hidden lg:col-span-4">
+          <WebMCPConsoleDock
+            tools={tools}
+            runtimeMode={runtimeMode}
+            onRefreshTools={refreshTools}
+            externalOpenDualModal={openDualModalTick}
+          />
+        </section>
+      </main>
+
+      <ApprovalGateModal />
+    </div>
+  );
+};
+
+export default App;

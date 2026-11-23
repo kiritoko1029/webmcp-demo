@@ -1,0 +1,30 @@
+{
+  "name": "nexusops-webmcp-showcase",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "NexusOps: Complex Enterprise Operations & Supply Chain Showcase powered by W3C WebMCP (document.modelContext)",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "@mcp-b/global": "^6.2.0",
+    "@mcp-b/webmcp-polyfill": "^6.2.0",
+    "@w3c/webmcp-polyfill": "^0.1.1",
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "webmcp-types": "^0.1.10"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "tailwindcss": "^4.1.7",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}
