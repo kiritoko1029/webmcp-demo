@@ -2,6 +2,7 @@ import { computeUsedBoxSlots, nexusStore } from '../store/nexusStore';
 import {
   buildLiveRiderSystemInstructions,
   ensureValidArgumentsJson,
+  filterAndSanitizeOutputItemsForReplay,
   type ResponseUsageMetrics,
   responsesSession,
   type StoredToolExchange,
@@ -284,9 +285,16 @@ function parseResponsesPayload(data: ResponsesApiPayload) {
 
   for (const item of outputItems) {
     const itemType = String(item.type || '');
-    if (itemType === 'reasoning' && Array.isArray(item.summary)) {
-      for (const s of item.summary as Array<{ text?: string }>) {
-        if (s?.text?.trim()) reasoningSummaries.push(s.text.trim());
+    if (itemType === 'reasoning') {
+      if (Array.isArray(item.summary)) {
+        for (const s of item.summary as Array<{ text?: string }>) {
+          if (s?.text?.trim()) reasoningSummaries.push(s.text.trim());
+        }
+      }
+      if (Array.isArray(item.content)) {
+        for (const c of item.content as Array<{ text?: string }>) {
+          if (c?.text?.trim()) reasoningSummaries.push(c.text.trim());
+        }
       }
     } else if (itemType === 'message' && Array.isArray(item.content)) {
       for (const block of item.content as Array<{ type?: string; text?: string; refusal?: string }>) {
@@ -687,6 +695,7 @@ export async function runNaturalLanguageWebMCPTurn(
     const turnAssistantTexts: string[] = [];
     const turnReasoningParts: string[] = [];
     const turnToolExchanges: StoredToolExchange[] = [];
+    const turnReplayItems: Array<Record<string, unknown>> = [];
     const turnUsage: ResponseUsageMetrics = {
       inputTokens: 0,
       cachedInputTokens: 0,
@@ -720,6 +729,10 @@ export async function runNaturalLanguageWebMCPTurn(
         '回复排版要求：不要贴原始 JSON 或内部函数名（工具日志已收纳在消息下方的弹窗按钮中）；请直接用干练生动的中文总结本回合战术成果，包含关键订单号(如 ORD-204)、商家名(**加粗**)、收支金额(如 +¥29.0)、取餐号(如 #K09)或段位分。',
       ].join('\n');
 
+      // On final sub-round (round === 7), force `tool_choice: "none"` so thinking models
+      // synthesize a genuine final message with `reasoning_text`!
+      const effectiveToolChoice = round === 7 ? 'none' : 'auto';
+
       let requestBody: Record<string, unknown>;
       if (useStatefulChain && chainResponseId) {
         requestBody = {
@@ -731,7 +744,7 @@ export async function runNaturalLanguageWebMCPTurn(
               ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }]
               : pendingToolOutputItems,
           tools: responsesTools,
-          tool_choice: 'auto',
+          tool_choice: effectiveToolChoice,
           store: true,
           truncation: 'auto',
         };
@@ -741,7 +754,7 @@ export async function runNaturalLanguageWebMCPTurn(
           instructions,
           input: statelessInputChain,
           tools: responsesTools,
-          tool_choice: 'auto',
+          tool_choice: effectiveToolChoice,
           store: useStatefulChain,
           ...(useStatefulChain ? { truncation: 'auto' } : {}),
         };
@@ -749,10 +762,8 @@ export async function runNaturalLanguageWebMCPTurn(
 
       let apiRes = await postResponsesRequest(endpoint, llmConfig.apiKey, requestBody, signal);
 
-      // Automatic fallback 1: Many `/v1/responses` gateways (NewAPI/OneAPI/DeepSeek/Ark/LiteLLM)
-      // return synthetic response IDs without persisting `previous_response_id` state on the server,
-      // causing HTTP 400 ("No tool call found for tool output with call_id ...") on round >= 1.
-      // Auto-downgrade to `sliding_window` (`statelessInputChain`) and retry seamlessly!
+      // Automatic fallback 1: Stateless `/v1/responses` gateways (DeepSeek / Ark / NewAPI / OneAPI)
+      // do not store `previous_response_id`; auto-downgrade to `sliding_window` and retry seamlessly!
       if (
         !apiRes.ok &&
         useStatefulChain &&
@@ -772,21 +783,23 @@ export async function runNaturalLanguageWebMCPTurn(
             instructions,
             input: statelessInputChain,
             tools: responsesTools,
-            tool_choice: 'auto',
+            tool_choice: effectiveToolChoice,
             store: false,
           },
           signal,
         );
       }
 
-      // Automatic fallback 2: If historical turns in `statelessInputChain` ever trigger a
-      // `tool call` / `call_id` mismatch on a strict proxy, compact older history into summary
-      // and retry cleanly from the current turn's fresh state snapshot!
+      // Automatic fallback 2: If switching between non-thinking & thinking models mid-session triggers
+      // a historical `reasoning_text` or `call_id` validation mismatch on round 0, fold older history
+      // into `rollingSummary` and retry cleanly from the live game snapshot!
       if (
         !apiRes.ok &&
         round === 0 &&
         statelessInputChain.length > 1 &&
-        /tool call|call_id|function_call|tool_calls/i.test(apiRes.errText)
+        /tool call|call_id|function_call|tool_calls|reasoning_text|reasoning_content|thinking/i.test(
+          apiRes.errText,
+        )
       ) {
         responsesSession.compactNow(0);
         statelessInputChain.splice(0, statelessInputChain.length, {
@@ -805,7 +818,7 @@ export async function runNaturalLanguageWebMCPTurn(
             ].join('\n'),
             input: statelessInputChain,
             tools: responsesTools,
-            tool_choice: 'auto',
+            tool_choice: effectiveToolChoice,
             store: false,
           },
           signal,
@@ -817,6 +830,7 @@ export async function runNaturalLanguageWebMCPTurn(
       }
 
       const parsed = parseResponsesPayload(apiRes.data);
+      const replayableOutputItems = filterAndSanitizeOutputItemsForReplay(parsed.outputItems);
       if (parsed.responseId) chainResponseId = parsed.responseId;
 
       turnUsage.inputTokens += parsed.usage.inputTokens;
@@ -829,6 +843,8 @@ export async function runNaturalLanguageWebMCPTurn(
       if (parsed.assistantText) turnAssistantTexts.push(parsed.assistantText);
 
       if (parsed.functionCalls.length === 0) {
+        turnReplayItems.push(...replayableOutputItems);
+
         const finalReply =
           turnAssistantTexts.join('\n\n').trim() || buildRichLocalReply(turnToolLogs);
 
@@ -845,6 +861,7 @@ export async function runNaturalLanguageWebMCPTurn(
           userPrompt: prompt,
           assistantTexts: [finalReply],
           toolExchanges: turnToolExchanges,
+          rawReplayItems: turnReplayItems,
           lastResponseId: useStatefulChain ? (chainResponseId ?? undefined) : undefined,
           usage: turnUsage,
         });
@@ -860,9 +877,11 @@ export async function runNaturalLanguageWebMCPTurn(
         };
       }
 
-      // Pair each `function_call` IMMEDIATELY with its matching `function_call_output` ([fc_0, fco_0, fc_1, fco_1])
-      // so official OpenAI `/v1/responses`, merging gateways, AND 1-by-1 `/chat/completions` adapters (NewAPI/OneAPI/DeepSeek)
-      // all see strict 1-to-1 `tool_calls -> tool` adjacency with zero orphan `call_id` errors!
+      // Preserve exact `reasoning` (`reasoning_text`) + `function_call` items from `data.output`
+      // in their original order, followed immediately by `function_call_output` items!
+      statelessInputChain.push(...replayableOutputItems);
+      turnReplayItems.push(...replayableOutputItems);
+
       pendingToolOutputItems = [];
       for (const fc of parsed.functionCalls) {
         const realToolName = nameMap.get(fc.name) ?? fc.name.replace(/__/g, '.');
@@ -907,19 +926,14 @@ export async function runNaturalLanguageWebMCPTurn(
           });
         }
 
-        const callItem = {
-          type: 'function_call',
-          call_id: fc.callId,
-          name: fc.name,
-          arguments: fc.argumentsJson,
-        };
         const outputItem = {
           type: 'function_call_output',
           call_id: fc.callId,
           output: outputJsonStr,
         };
         pendingToolOutputItems.push(outputItem);
-        statelessInputChain.push(callItem, outputItem);
+        statelessInputChain.push(outputItem);
+        turnReplayItems.push(outputItem);
 
         turnToolExchanges.push({
           callId: fc.callId,
@@ -940,6 +954,7 @@ export async function runNaturalLanguageWebMCPTurn(
       userPrompt: prompt,
       assistantTexts: [fallbackReply],
       toolExchanges: turnToolExchanges,
+      rawReplayItems: turnReplayItems,
       lastResponseId: useStatefulChain ? (chainResponseId ?? undefined) : undefined,
       usage: turnUsage,
     });

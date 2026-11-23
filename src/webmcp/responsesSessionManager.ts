@@ -30,6 +30,12 @@ export interface ConversationTurnRecord {
   userPrompt: string;
   assistantTexts: string[];
   toolExchanges: StoredToolExchange[];
+  /**
+   * Verbatim sequence of sanitized `/v1/responses` output items (`reasoning` with `reasoning_text`,
+   * `function_call`, `function_call_output`, and `message`) so thinking models (DeepSeek / Ark / Claude / OpenAI)
+   * receive their mandatory reasoning blocks back across multi-turn tool loops!
+   */
+  rawReplayItems?: Array<Record<string, unknown>>;
   lastResponseId?: string;
   usage: ResponseUsageMetrics;
 }
@@ -47,7 +53,7 @@ export interface ResponsesSessionState {
   cumulativeUsage: ResponseUsageMetrics;
 }
 
-const SESSION_STORAGE_KEY = 'ridergo_responses_session_v2';
+const SESSION_STORAGE_KEY = 'ridergo_responses_session_v3';
 
 export function ensureValidArgumentsJson(raw: unknown): string {
   if (typeof raw === 'string') {
@@ -71,6 +77,54 @@ export function ensureValidArgumentsJson(raw: unknown): string {
     }
   }
   return '{}';
+}
+
+/**
+ * Preserves verbatim `reasoning` blocks (`reasoning_text` / `reasoning_content` / `encrypted_content`)
+ * required by DeepSeek / Volcengine Ark / Claude thinking modes, while omitting bare OpenAI
+ * `{ id: "rs_...", type: "reasoning", summary: [] }` server pointers under `store: false`.
+ */
+export function filterAndSanitizeOutputItemsForReplay(
+  outputItems: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const result: Array<Record<string, unknown>> = [];
+
+  for (const item of outputItems) {
+    if (!item || typeof item !== 'object') continue;
+    const itemType = String(item.type || '');
+
+    if (itemType === 'reasoning') {
+      const hasContentProp = Array.isArray(item.content);
+      const hasNonEmptySummary = Array.isArray(item.summary) && item.summary.length > 0;
+      const hasExplicitReasoningField =
+        typeof item.reasoning_content === 'string' ||
+        typeof item.reasoning_text === 'string' ||
+        typeof item.encrypted_content === 'string';
+
+      if (hasContentProp || hasNonEmptySummary || hasExplicitReasoningField) {
+        result.push({ ...item });
+      }
+      continue;
+    }
+
+    if (itemType === 'function_call') {
+      const callId = String(item.call_id || item.id || '');
+      if (!callId || !item.name) continue;
+      result.push({
+        ...item,
+        type: 'function_call',
+        call_id: callId,
+        arguments: ensureValidArgumentsJson(item.arguments),
+      });
+      continue;
+    }
+
+    if (itemType === 'message') {
+      result.push({ ...item });
+    }
+  }
+
+  return result;
 }
 
 function emptyUsage(): ResponseUsageMetrics {
@@ -268,6 +322,12 @@ export const responsesSession = {
     const total = sessionState.turns.length;
 
     sessionState.turns.forEach((turn, idx) => {
+      // Skip local non-LLM bot turns so thinking models (DeepSeek / Ark) never see
+      // a synthetic assistant message lacking `reasoning_text` in `input`!
+      if (!turn.rawReplayItems || turn.rawReplayItems.length === 0) {
+        return;
+      }
+
       const isRecentTurn = total - idx <= 3;
       items.push({
         type: 'message',
@@ -275,30 +335,15 @@ export const responsesSession = {
         content: [{ type: 'input_text', text: turn.userPrompt }],
       });
 
-      // Emit strict 1-to-1 [function_call, function_call_output] pairs so official OpenAI `/v1/responses`
-      // AND all `/chat/completions` translator gateways (NewAPI/OneAPI/DeepSeek/Claude) stay 100% aligned
-      for (const ex of turn.toolExchanges) {
-        if (!ex.callId || !ex.apiToolName) continue;
-        items.push({
-          type: 'function_call',
-          call_id: ex.callId,
-          name: ex.apiToolName,
-          arguments: ensureValidArgumentsJson(ex.argumentsJson),
-        });
-        items.push({
-          type: 'function_call_output',
-          call_id: ex.callId,
-          output: slimHistoricalToolOutput(ex.outputJson || '{}', isRecentTurn),
-        });
-      }
-
-      const finalAssistantText = turn.assistantTexts.join('\n').trim();
-      if (finalAssistantText) {
-        items.push({
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: finalAssistantText }],
-        });
+      for (const rawItem of turn.rawReplayItems) {
+        if (rawItem.type === 'function_call_output') {
+          items.push({
+            ...rawItem,
+            output: slimHistoricalToolOutput(String(rawItem.output ?? '{}'), isRecentTurn),
+          });
+        } else {
+          items.push(rawItem);
+        }
       }
     });
 
