@@ -767,8 +767,8 @@ export const WorldDirectorModal: React.FC<Props> = ({
                     }
                     className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-slate-200"
                   >
-                    <option value="stateful_chain">链式续接 (previous_response_id + 自动回退)</option>
-                    <option value="sliding_window">无状态本地滑窗 (store: false + 摘要裁剪)</option>
+                    <option value="sliding_window">本地滑窗全兼容 (默认推荐 · 兼容中转/DeepSeek/OpenAI)</option>
+                    <option value="stateful_chain">服务端链式续接 (仅原生 OpenAI previous_response_id)</option>
                   </select>
                 </label>
 

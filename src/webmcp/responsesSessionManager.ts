@@ -21,6 +21,7 @@ export interface StoredToolExchange {
   apiToolName: string;
   argumentsJson: string;
   outputJson: string;
+  subRound?: number;
 }
 
 export interface ConversationTurnRecord {
@@ -46,7 +47,31 @@ export interface ResponsesSessionState {
   cumulativeUsage: ResponseUsageMetrics;
 }
 
-const SESSION_STORAGE_KEY = 'ridergo_responses_session_v1';
+const SESSION_STORAGE_KEY = 'ridergo_responses_session_v2';
+
+export function ensureValidArgumentsJson(raw: unknown): string {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return '{}';
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return trimmed;
+      }
+      return JSON.stringify(parsed ?? {});
+    } catch {
+      return '{}';
+    }
+  }
+  if (raw && typeof raw === 'object') {
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return '{}';
+    }
+  }
+  return '{}';
+}
 
 function emptyUsage(): ResponseUsageMetrics {
   return {
@@ -59,7 +84,7 @@ function emptyUsage(): ResponseUsageMetrics {
 }
 
 function createFreshSession(
-  contextMode: ContextMode = 'stateful_chain',
+  contextMode: ContextMode = 'sliding_window',
   maxWindowTurns = 8,
 ): ResponsesSessionState {
   return {
@@ -86,7 +111,7 @@ function loadSessionFromStorage(): ResponsesSessionState {
     return {
       sessionId: parsed.sessionId ?? `sess_${Date.now().toString(36)}`,
       createdAt: parsed.createdAt ?? new Date().toTimeString().slice(0, 8),
-      contextMode: parsed.contextMode ?? 'stateful_chain',
+      contextMode: parsed.contextMode ?? 'sliding_window',
       maxWindowTurns: typeof parsed.maxWindowTurns === 'number' ? parsed.maxWindowTurns : 8,
       boundBaseUrl: parsed.boundBaseUrl ?? '',
       lastResponseId: parsed.lastResponseId ?? null,
@@ -250,17 +275,20 @@ export const responsesSession = {
         content: [{ type: 'input_text', text: turn.userPrompt }],
       });
 
+      // Emit strict 1-to-1 [function_call, function_call_output] pairs so official OpenAI `/v1/responses`
+      // AND all `/chat/completions` translator gateways (NewAPI/OneAPI/DeepSeek/Claude) stay 100% aligned
       for (const ex of turn.toolExchanges) {
+        if (!ex.callId || !ex.apiToolName) continue;
         items.push({
           type: 'function_call',
           call_id: ex.callId,
           name: ex.apiToolName,
-          arguments: ex.argumentsJson || '{}',
+          arguments: ensureValidArgumentsJson(ex.argumentsJson),
         });
         items.push({
           type: 'function_call_output',
           call_id: ex.callId,
-          output: slimHistoricalToolOutput(ex.outputJson, isRecentTurn),
+          output: slimHistoricalToolOutput(ex.outputJson || '{}', isRecentTurn),
         });
       }
 

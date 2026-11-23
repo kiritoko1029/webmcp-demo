@@ -40,7 +40,11 @@ import {
   type DiscoveredToolItem,
   executeWebMCPByName,
 } from '../webmcp/useWebMCPBridge';
-import { triggerSuddenWorldEvent, useWorldModelConfig } from '../webmcp/worldDirector';
+import {
+  spawnDynamicOrdersWave,
+  triggerSuddenWorldEvent,
+  useWorldModelConfig,
+} from '../webmcp/worldDirector';
 import { RichChatContent, TurnToolLogsModal } from './RichChatContent';
 import { WorldDirectorModal } from './WorldDirectorModal';
 
@@ -282,6 +286,8 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
   };
 
   // Single AI Autonomous Step or Continuous Auto-Play Loop!
+  const consecutiveAutoErrRef = useRef(0);
+
   const executeSingleArenaRound = useCallback(async () => {
     if (nexusStore.getState().shift.shiftEnded) {
       autoPlayRef.current = false;
@@ -291,7 +297,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         {
           id: `shift-end-${Date.now()}`,
           role: 'assistant',
-          content: `**180 分钟午高峰挑战班次圆满结束！** 最终段位总分：**${nexusStore.getState().shift.arenaScore} 分**，钱包结余 ¥${nexusStore.getState().rider.walletYuan.toFixed(2)}。点击右上角【重置跑单数据】或【双模型与世界生成】可开启新地图挑战！`,
+          content: `**180 分钟午高峰挑战班次圆满结束！** 最终段位总分：**${nexusStore.getState().shift.arenaScore} 分**，钱包结余 ¥${nexusStore.getState().rider.walletYuan.toFixed(2)}。点击右上角【同种子重开】或【世界导演 & 种子/模型】可开启新一轮挑战！`,
         },
       ]);
       return false;
@@ -306,9 +312,33 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
     activeCallAbortRef.current = ac;
 
     try {
+      // Auto-replenish orders if pool + active is running dry before shift ends!
+      const preSnap = nexusStore.getState();
+      const remainingPlayable = preSnap.orders.filter(
+        (o) => o.stage !== 'delivered' && o.stage !== 'dropped',
+      ).length;
+      if (remainingPlayable === 0 && !preSnap.shift.shiftEnded) {
+        try {
+          setLiveProgressText('大厅订单已清空，世界导演正在派发新波次悬赏单...');
+          const waveRes = await spawnDynamicOrdersWave(3, ac.signal);
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              id: `world-wave-${Date.now()}`,
+              role: 'assistant',
+              content: `**【世界导演动态派单】** 大厅补货 **3 单**新悬赏（${waveRes.spawnedIds.join('、')}），继续冲分！`,
+            },
+          ]);
+        } catch {
+          // Ignore World Director wave error so Rider loop continues
+        }
+      }
+
       const turnRes = await runAutonomousArenaRound(llmConfig, ac.signal, (txt) =>
         setLiveProgressText(txt),
       );
+      consecutiveAutoErrRef.current = 0;
+
       setChatMessages((prev) => [
         ...prev,
         {
@@ -318,29 +348,71 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         },
       ]);
 
-      // Every 3 autonomous rounds, World Director injects a dynamic world event!
+      // Every 3 autonomous rounds, World Director injects a dynamic world event (isolated try/catch)!
       if (roundNo % 3 === 0 && !nexusStore.getState().shift.shiftEnded) {
-        setLiveProgressText('世界导演正在演化城市动态事件...');
-        const evText = await triggerSuddenWorldEvent(ac.signal);
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `world-ev-${Date.now()}`,
-            role: 'assistant',
-            content: `**【世界导演动态事件】** ${evText}`,
-          },
-        ]);
+        try {
+          setLiveProgressText('世界导演正在演化城市动态事件...');
+          const evText = await triggerSuddenWorldEvent(ac.signal);
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              id: `world-ev-${Date.now()}`,
+              role: 'assistant',
+              content: `**【世界导演动态事件】** ${evText}`,
+            },
+          ]);
+        } catch {
+          // Never let optional World Director event failure stop Rider AI gameplay
+        }
       }
       return true;
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isUserAbort =
+        ac.signal.aborted || (err instanceof DOMException && err.name === 'AbortError');
+      const isFatalAuth = /HTTP 401|HTTP 403|API Key/i.test(errMsg);
+
+      if (isUserAbort) {
+        autoPlayRef.current = false;
+        setAutoPlayActive(false);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `auto-abort-${Date.now()}`,
+            role: 'assistant',
+            content: '已手动暂停 AI 自动闯关。',
+          },
+        ]);
+        return false;
+      }
+
+      consecutiveAutoErrRef.current += 1;
+      // Self-heal session context on transient gateway / tool_call sync errors
+      responsesSession.setContextConfig({ contextMode: 'sliding_window' });
+      responsesSession.compactNow(1);
+
+      if (!isFatalAuth && autoPlayRef.current && consecutiveAutoErrRef.current < 3) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `auto-retry-${Date.now()}`,
+            role: 'assistant',
+            content: `本回合接口波动（第 ${consecutiveAutoErrRef.current}/2 次自动容错修复）：已切换为全兼容无状态滑窗并重整上下文，**1.5 秒后自动继续下一回合**。\n> 详情：${errMsg.slice(0, 180)}`,
+          },
+        ]);
+        await new Promise((r) => setTimeout(r, 1500));
+        return true;
+      }
+
       autoPlayRef.current = false;
       setAutoPlayActive(false);
+      consecutiveAutoErrRef.current = 0;
       setChatMessages((prev) => [
         ...prev,
         {
           id: `auto-err-${Date.now()}`,
           role: 'assistant',
-          content: `自动闯关已停止：**${err instanceof Error ? err.message : String(err)}**`,
+          content: `自动闯关已停止：**${errMsg}**`,
         },
       ]);
       return false;

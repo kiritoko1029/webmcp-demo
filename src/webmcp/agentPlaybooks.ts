@@ -1,6 +1,7 @@
 import { computeUsedBoxSlots, nexusStore } from '../store/nexusStore';
 import {
   buildLiveRiderSystemInstructions,
+  ensureValidArgumentsJson,
   type ResponseUsageMetrics,
   responsesSession,
   type StoredToolExchange,
@@ -296,9 +297,11 @@ function parseResponsesPayload(data: ResponsesApiPayload) {
         }
       }
     } else if (itemType === 'function_call') {
-      const callId = String(item.call_id || item.id || `call_${Date.now()}`);
+      const callId = String(
+        item.call_id || item.id || `call_${Date.now()}_${functionCalls.length}`,
+      );
       const name = String(item.name || '');
-      const argumentsJson = typeof item.arguments === 'string' ? item.arguments : '{}';
+      const argumentsJson = ensureValidArgumentsJson(item.arguments);
       if (name) {
         functionCalls.push({ callId, name, argumentsJson });
       }
@@ -746,12 +749,18 @@ export async function runNaturalLanguageWebMCPTurn(
 
       let apiRes = await postResponsesRequest(endpoint, llmConfig.apiKey, requestBody, signal);
 
+      // Automatic fallback 1: Many `/v1/responses` gateways (NewAPI/OneAPI/DeepSeek/Ark/LiteLLM)
+      // return synthetic response IDs without persisting `previous_response_id` state on the server,
+      // causing HTTP 400 ("No tool call found for tool output with call_id ...") on round >= 1.
+      // Auto-downgrade to `sliding_window` (`statelessInputChain`) and retry seamlessly!
       if (
         !apiRes.ok &&
         useStatefulChain &&
-        (chainResponseId !== null || requestBody.truncation !== undefined) &&
-        /previous_response_id|not found|store|truncation/i.test(apiRes.errText)
+        (chainResponseId !== null || requestBody.truncation !== undefined || requestBody.store === true) &&
+        apiRes.status !== 401 &&
+        apiRes.status !== 403
       ) {
+        responsesSession.setContextConfig({ contextMode: 'sliding_window' });
         responsesSession.invalidateServerCursor();
         useStatefulChain = false;
         chainResponseId = null;
@@ -764,6 +773,40 @@ export async function runNaturalLanguageWebMCPTurn(
             input: statelessInputChain,
             tools: responsesTools,
             tool_choice: 'auto',
+            store: false,
+          },
+          signal,
+        );
+      }
+
+      // Automatic fallback 2: If historical turns in `statelessInputChain` ever trigger a
+      // `tool call` / `call_id` mismatch on a strict proxy, compact older history into summary
+      // and retry cleanly from the current turn's fresh state snapshot!
+      if (
+        !apiRes.ok &&
+        round === 0 &&
+        statelessInputChain.length > 1 &&
+        /tool call|call_id|function_call|tool_calls/i.test(apiRes.errText)
+      ) {
+        responsesSession.compactNow(0);
+        statelessInputChain.splice(0, statelessInputChain.length, {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: prompt }],
+        });
+        apiRes = await postResponsesRequest(
+          endpoint,
+          llmConfig.apiKey,
+          {
+            model: llmConfig.model.trim() || 'gpt-4.1-mini',
+            instructions: [
+              buildLiveRiderSystemInstructions(responsesSession.getState().rollingSummary),
+              '回复排版要求：不要贴原始 JSON 或内部函数名；请用干练生动的中文总结本回合战术成果。',
+            ].join('\n'),
+            input: statelessInputChain,
+            tools: responsesTools,
+            tool_choice: 'auto',
+            store: false,
           },
           signal,
         );
@@ -782,7 +825,6 @@ export async function runNaturalLanguageWebMCPTurn(
       turnUsage.reasoningTokens += parsed.usage.reasoningTokens;
       turnUsage.totalTokens += parsed.usage.totalTokens;
 
-      if (parsed.outputItems.length > 0) statelessInputChain.push(...parsed.outputItems);
       if (parsed.reasoningText) turnReasoningParts.push(parsed.reasoningText);
       if (parsed.assistantText) turnAssistantTexts.push(parsed.assistantText);
 
@@ -818,6 +860,9 @@ export async function runNaturalLanguageWebMCPTurn(
         };
       }
 
+      // Pair each `function_call` IMMEDIATELY with its matching `function_call_output` ([fc_0, fco_0, fc_1, fco_1])
+      // so official OpenAI `/v1/responses`, merging gateways, AND 1-by-1 `/chat/completions` adapters (NewAPI/OneAPI/DeepSeek)
+      // all see strict 1-to-1 `tool_calls -> tool` adjacency with zero orphan `call_id` errors!
       pendingToolOutputItems = [];
       for (const fc of parsed.functionCalls) {
         const realToolName = nameMap.get(fc.name) ?? fc.name.replace(/__/g, '.');
@@ -862,13 +907,19 @@ export async function runNaturalLanguageWebMCPTurn(
           });
         }
 
+        const callItem = {
+          type: 'function_call',
+          call_id: fc.callId,
+          name: fc.name,
+          arguments: fc.argumentsJson,
+        };
         const outputItem = {
           type: 'function_call_output',
           call_id: fc.callId,
           output: outputJsonStr,
         };
         pendingToolOutputItems.push(outputItem);
-        statelessInputChain.push(outputItem);
+        statelessInputChain.push(callItem, outputItem);
 
         turnToolExchanges.push({
           callId: fc.callId,
@@ -876,6 +927,7 @@ export async function runNaturalLanguageWebMCPTurn(
           apiToolName: fc.name,
           argumentsJson: fc.argumentsJson,
           outputJson: outputJsonStr,
+          subRound: round,
         });
       }
     }
@@ -1009,7 +1061,6 @@ export async function runNaturalLanguageWebMCPTurn(
     plannedCalls.push({ toolName: 'rider.get_shift_summary', input: {} });
   }
 
-  const localExchanges: StoredToolExchange[] = [];
   for (let idx = 0; idx < plannedCalls.length; idx++) {
     const call = plannedCalls[idx];
     onProgress(`正在执行 ${call.toolName} (${idx + 1}/${plannedCalls.length})...`);
@@ -1027,13 +1078,6 @@ export async function runNaturalLanguageWebMCPTurn(
       input: call.input,
       output: res.parsed,
     });
-    localExchanges.push({
-      callId: `local_${Date.now()}_${idx}`,
-      toolName: call.toolName,
-      apiToolName: call.toolName.replace(/\./g, '__'),
-      argumentsJson: JSON.stringify(call.input),
-      outputJson: res.raw,
-    });
   }
 
   const finalReply = buildRichLocalReply(turnToolLogs);
@@ -1042,7 +1086,8 @@ export async function runNaturalLanguageWebMCPTurn(
     createdAt: new Date().toTimeString().slice(0, 8),
     userPrompt: prompt,
     assistantTexts: [finalReply],
-    toolExchanges: localExchanges,
+    // Omit synthetic local call_ids so switching to a real LLM mid-session stays 100% clean
+    toolExchanges: [],
     usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
   });
 
