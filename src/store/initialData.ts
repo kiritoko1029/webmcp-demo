@@ -227,6 +227,8 @@ export function createInitialShift(): GameShiftState {
     safeDetoursCount: 0,
     hazardsHitCount: 0,
     batteryBreakdownsCount: 0,
+    debugToolCallsCount: 0,
+    actionTrace: [],
   };
 }
 

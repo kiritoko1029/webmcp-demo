@@ -264,7 +264,7 @@ export async function executeWebMCPByName(
   const discovered = await discoverWebMCPTools();
   const item = discovered.find((d) => d.name === toolName);
   if (!item) {
-    if (trackTelemetry) nexusStore.recordToolTelemetry(false);
+    if (trackTelemetry) nexusStore.recordToolTelemetry(false, toolName, true);
     const errMsg = nexusStore.getState().benchmarkBlindMode &&
       (toolName.startsWith('debug.') || toolName === 'navigation.plan_optimal_route')
       ? `硬核盲测模式下已禁用辅助/调试工具 "${toolName}"，请使用真实业务工具自主决策！`
@@ -315,7 +315,7 @@ export async function executeWebMCPByName(
       // Keep raw string
     }
 
-    if (trackTelemetry) nexusStore.recordToolTelemetry(true);
+    nexusStore.recordToolTelemetry(true, toolName, trackTelemetry);
 
     const summaryItem = formatLiveActionSummary(toolName, input, parsed, caller);
     nexusStore.appendLiveAction(
@@ -346,7 +346,7 @@ export async function executeWebMCPByName(
   } catch (err) {
     const durationMs = Math.round(performance.now() - started);
     const message = err instanceof Error ? err.message : String(err);
-    if (trackTelemetry) nexusStore.recordToolTelemetry(false);
+    if (trackTelemetry) nexusStore.recordToolTelemetry(false, toolName, true);
 
     nexusStore.appendLiveAction(
       {

@@ -335,7 +335,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         {
           id: `shift-end-${Date.now()}`,
           role: 'assistant',
-          content: `**180 分钟午高峰挑战班次圆满结束！成绩已自动上传至【全网云端评测榜单】！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 点击顶部 **【评测榜单】** 即可与全网其它大模型战绩叠加六维雷达图对比！`,
+          content: `**180 分钟午高峰挑战班次圆满结束！成绩已提交至【云端评测安全网关】！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 点击顶部 **【云端榜单】** 可查看六维能力雷达图（访客成绩经反作弊核验后进入待审队列，管理员审核通过后全网公开）！`,
         },
       ]);
       return false;

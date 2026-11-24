@@ -2,14 +2,20 @@ import React, { useEffect, useState } from 'react';
 import {
   Award,
   BookmarkPlus,
+  Check,
   Cloud,
   CloudUpload,
   Filter,
+  KeyRound,
   Loader2,
+  Lock,
+  LogOut,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   Swords,
   Target,
+  Trash2,
   Trophy,
   X,
 } from 'lucide-react';
@@ -17,6 +23,8 @@ import {
   type BenchmarkRunRecord,
   benchmarkStore,
   computeSixDimensionScores,
+  getSavedAdminPassword,
+  setSavedAdminPassword,
   type SixDimensionScores,
   useBenchmarkRecords,
   useCloudLeaderboardStatus,
@@ -155,18 +163,73 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
   const [justSavedToast, setJustSavedToast] = useState<string | null>(null);
   const [challengingId, setChallengingId] = useState<string | null>(null);
 
+  // Admin Review & Cleanup Panel State
+  const [showAdminDrawer, setShowAdminDrawer] = useState(false);
+  const [adminInitialized, setAdminInitialized] = useState<boolean | null>(null);
+  const [adminUnlocked, setAdminUnlocked] = useState<boolean>(() => Boolean(getSavedAdminPassword()));
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [adminFeedback, setAdminFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [bootstrapInput, setBootstrapInput] = useState('');
+  const [adminPwdInput, setAdminPwdInput] = useState('');
+  const [pendingRuns, setPendingRuns] = useState<BenchmarkRunRecord[]>([]);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+
+  const refreshAdminData = async (pwdOverride?: string) => {
+    setAdminBusy(true);
+    setAdminFeedback(null);
+    try {
+      const lists = await benchmarkStore.fetchAdminLists(pwdOverride);
+      setPendingRuns(lists.pendingRuns);
+      setAdminUnlocked(true);
+    } catch (err) {
+      setAdminUnlocked(false);
+      setSavedAdminPassword('');
+      setAdminFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
   useEffect(() => {
-    if (open) {
-      void benchmarkStore.fetchCloudLeaderboard();
+    if (!open) return;
+    void benchmarkStore.fetchCloudLeaderboard();
+    if (getSavedAdminPassword()) {
+      void refreshAdminData();
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !showAdminDrawer) return;
+    void (async () => {
+      try {
+        const st = await benchmarkStore.checkAdminStatus();
+        setAdminInitialized(st.initialized);
+        if (st.initialized && getSavedAdminPassword()) {
+          await refreshAdminData();
+        }
+      } catch (err) {
+        setAdminFeedback({
+          ok: false,
+          text: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  }, [open, showAdminDrawer]);
 
   if (!open) return null;
 
   const totalTokens = responsesSession.getState().cumulativeUsage.totalTokens;
   const liveRadar = computeSixDimensionScores({ shift, rider, totalTokens });
 
-  const unsyncedCount = allRecords.filter((r) => r.isLocalOwner && !r.syncedToCloud).length;
+  const unsyncedCount = allRecords.filter(
+    (r) =>
+      r.isLocalOwner &&
+      !r.syncedToCloud &&
+      (adminUnlocked || (r.elapsedMinutes >= 180 && (r.debugToolCallsCount ?? 0) === 0)),
+  ).length;
 
   const filteredRecords = allRecords
     .filter((r) => (!sameSeedOnly ? true : r.seedId === worldMap.seedId))
@@ -182,7 +245,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
 
   const handleSaveCurrentRun = () => {
     if (shift.elapsedMinutes < 1) {
-      setJustSavedToast('请至少推进 1 分钟以上游戏进度后再提交上榜（建议跑满 180 分钟完整局）！');
+      setJustSavedToast('请至少推进 1 分钟以上游戏进度后再记录战绩！');
       window.setTimeout(() => setJustSavedToast(null), 3500);
       return;
     }
@@ -199,20 +262,77 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
       rider,
       totalTokens,
     });
-    setJustSavedToast(
-      `已将「${saved.modelName}」在种子 [${saved.seedId}] 下的战绩 (${saved.arenaScore}分) 自动同步至全网云端排行榜！`,
-    );
-    window.setTimeout(() => setJustSavedToast(null), 4000);
+    const note = adminUnlocked
+      ? `管理员直通：已将「${saved.modelName}」(${saved.arenaScore}分) 直接公开上榜！`
+      : shift.elapsedMinutes >= 180 && (shift.debugToolCallsCount ?? 0) === 0
+        ? `已提交「${saved.modelName}」(${saved.arenaScore}分) 进入云端反作弊与管理员待审队列！`
+        : `未满 180 分钟或含调试工具，已为您保存在本地榜单。`;
+    setJustSavedToast(note);
+    window.setTimeout(() => setJustSavedToast(null), 4500);
   };
 
   const handleSyncUnsynced = async () => {
     const res = await benchmarkStore.syncUnsyncedLocalRecordsToCloud();
+    if (adminUnlocked) {
+      await refreshAdminData();
+    }
     setJustSavedToast(
       res.uploaded > 0
-        ? `已成功将本地 ${res.uploaded} 条历史评测战绩同步至云端公共榜单！`
-        : '所有有效战绩均已与云端同步！',
+        ? `已成功将本地 ${res.uploaded} 条有效战绩上传至云端！`
+        : '暂无符合条件（180分钟完赛且0作弊）的未同步本地记录。',
     );
     window.setTimeout(() => setJustSavedToast(null), 3500);
+  };
+
+  const handleAdminSetup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bootstrapInput.trim() || adminPwdInput.trim().length < 8) {
+      setAdminFeedback({ ok: false, text: '请填写首次激活码，并设置至少 8 位的管理员密码' });
+      return;
+    }
+    setAdminBusy(true);
+    setAdminFeedback(null);
+    try {
+      const msg = await benchmarkStore.setupInitialAdminPassword(
+        bootstrapInput.trim(),
+        adminPwdInput.trim(),
+      );
+      setAdminInitialized(true);
+      setAdminUnlocked(true);
+      setBootstrapInput('');
+      setAdminPwdInput('');
+      setAdminFeedback({ ok: true, text: msg });
+      await refreshAdminData();
+    } catch (err) {
+      setAdminFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const handleAdminLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminPwdInput.trim()) return;
+    await refreshAdminData(adminPwdInput.trim());
+    setAdminPwdInput('');
+  };
+
+  const handleModerateOp = async (
+    op: 'approve' | 'approve_all_pending' | 'delete' | 'purge_pending' | 'clear_approved',
+    clientRunId?: string,
+  ) => {
+    setAdminBusy(true);
+    setAdminFeedback(null);
+    try {
+      const msg = await benchmarkStore.adminModerate({ op, clientRunId });
+      setConfirmClearAll(false);
+      await refreshAdminData();
+      setAdminFeedback({ ok: true, text: msg });
+    } catch (err) {
+      setAdminFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setAdminBusy(false);
+    }
   };
 
   const handleChallengeSameWorld = async (rec: BenchmarkRunRecord, e: React.MouseEvent) => {
@@ -247,7 +367,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
         className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-amber-500/40 bg-slate-900 shadow-2xl"
       >
         {/* Header */}
-        <div className="flex shrink-0 items-center justify-between border-b border-slate-800 px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-800 px-5 py-3.5">
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <Trophy className="h-4 w-4 text-amber-400" />
@@ -263,36 +383,265 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
               >
                 <Cloud className="h-3 w-3" />
                 {cloudStatus.loading || cloudStatus.syncing
-                  ? 'Supabase 云端同步中...'
+                  ? '云端安全同步中...'
                   : cloudStatus.connected
-                    ? `云端实时已连线 (${cloudStatus.cloudCount} 条全网记录)`
+                    ? `云端已过审公开 (${cloudStatus.cloudCount} 条)`
                     : '云端连接中'}
               </span>
               <span className="rounded-full border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] text-indigo-300">
                 当前种子: {worldMap.seedId}
               </span>
-              {blindMode && (
-                <span className="rounded-full border border-rose-500/45 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] font-bold text-rose-300">
-                  🎯 硬核盲测模式
-                </span>
-              )}
             </div>
             <p className="mt-0.5 text-xs text-slate-400">
-              战绩实时存储于 Supabase 云端公共库，所有人打开网页均可查看全网排行，并可点击任意战绩右侧【⚡ 挑战同款地图】一键复现完全相同的地图与事件进行公平对决！
+              所有云榜记录均经过**服务端开局加密票据 + IP 限流 + 游戏物理与工具轨迹反作弊核验 + 管理员人工审核**，杜绝伪造刷榜。
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAdminDrawer((v) => !v)}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
+                adminUnlocked
+                  ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
+                  : showAdminDrawer
+                    ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
+                    : 'border-slate-700 bg-slate-800 text-slate-300 hover:text-white'
+              }`}
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              {adminUnlocked ? `管理后台 (${pendingRuns.length}待审)` : '管理员审核'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-5 text-xs">
+          {/* Collapsible Admin Moderation & Cleanup Console */}
+          {showAdminDrawer && (
+            <div className="rounded-xl border border-amber-500/40 bg-slate-950/95 p-4 shadow-lg">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <ShieldAlert className="h-4 w-4 text-amber-400" />
+                  <span className="font-bold text-amber-200">
+                    管理员战绩审核与云榜清理后台
+                  </span>
+                  {adminUnlocked && (
+                    <span className="rounded bg-emerald-500/20 px-2 py-0.5 font-mono text-[10px] text-emerald-300">
+                      ● 已解锁管理权限（本人跑分自动免审直通上榜）
+                    </span>
+                  )}
+                </div>
+
+                {adminUnlocked && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={adminBusy}
+                      onClick={() => void refreshAdminData()}
+                      className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:text-white"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${adminBusy ? 'animate-spin' : ''}`} />
+                      刷新待审
+                    </button>
+                    {!confirmClearAll ? (
+                      <button
+                        type="button"
+                        disabled={adminBusy || cloudStatus.cloudCount === 0}
+                        onClick={() => setConfirmClearAll(true)}
+                        className="inline-flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-[11px] text-rose-300 hover:bg-rose-500/20 disabled:opacity-40"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        清空整个公开榜
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={adminBusy}
+                        onClick={() => void handleModerateOp('clear_approved')}
+                        className="inline-flex items-center gap-1 rounded bg-rose-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-rose-500"
+                      >
+                        确认彻底清空全部公开记录？
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSavedAdminPassword('');
+                        setAdminUnlocked(false);
+                        setPendingRuns([]);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-400 hover:text-white"
+                    >
+                      <LogOut className="h-3 w-3" />
+                      退出管理态
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {!adminUnlocked ? (
+                adminInitialized === false ? (
+                  <form onSubmit={(e) => void handleAdminSetup(e)} className="mt-3 space-y-2.5">
+                    <p className="text-[11px] text-amber-200/90">
+                      首次启用管理员后台：请输入一次性初始化激活码，并设置你自己的专属管理员密码（将以 PBKDF2 10万次加密哈希存入服务端私有库，激活码用后即刻销毁）。
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        type="text"
+                        value={bootstrapInput}
+                        onChange={(e) => setBootstrapInput(e.target.value)}
+                        placeholder="一次性初始化激活码 (ARENA-INIT-...)"
+                        className="w-60 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-slate-100"
+                      />
+                      <input
+                        type="password"
+                        value={adminPwdInput}
+                        onChange={(e) => setAdminPwdInput(e.target.value)}
+                        placeholder="设置专属管理员密码 (至少 8 位)"
+                        className="min-w-[220px] flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100"
+                      />
+                      <button
+                        type="button"
+                        disabled={adminBusy}
+                        onClick={(e) => void handleAdminSetup(e as unknown as React.FormEvent)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-1.5 font-bold text-slate-950 hover:bg-amber-400"
+                      >
+                        <Lock className="h-3.5 w-3.5" />
+                        完成首次密码绑定
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={(e) => void handleAdminLogin(e)} className="mt-3 flex flex-wrap gap-2">
+                    <input
+                      type="password"
+                      value={adminPwdInput}
+                      onChange={(e) => setAdminPwdInput(e.target.value)}
+                      placeholder="输入管理员密码以审核待审提交或删除云榜记录..."
+                      className="min-w-[240px] flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100"
+                    />
+                    <button
+                      type="submit"
+                      disabled={adminBusy}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-1.5 font-bold text-slate-950 hover:bg-amber-400"
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      {adminBusy ? '验证中...' : '解锁管理员后台'}
+                    </button>
+                  </form>
+                )
+              ) : (
+                <div className="mt-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-200">
+                      待审核队列（共 <strong className="text-amber-300">{pendingRuns.length}</strong> 条访客完赛提交）
+                    </span>
+                    {pendingRuns.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={adminBusy}
+                          onClick={() => void handleModerateOp('approve_all_pending')}
+                          className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-500"
+                        >
+                          <Check className="h-3 w-3" />
+                          一键全部通过 ({pendingRuns.length})
+                        </button>
+                        <button
+                          type="button"
+                          disabled={adminBusy}
+                          onClick={() => void handleModerateOp('purge_pending')}
+                          className="inline-flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/25"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          清空全部待审
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {pendingRuns.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-slate-800 py-4 text-center text-slate-500">
+                      当前没有待审核的访客提交（下方公开榜每行右侧也已为您开启「删除」清理按钮）。
+                    </div>
+                  ) : (
+                    <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
+                      {pendingRuns.map((pr) => (
+                        <div
+                          key={pr.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/90 px-3 py-2"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-bold text-white">{pr.modelName}</span>
+                              {pr.playerTag && (
+                                <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+                                  @{pr.playerTag}
+                                </span>
+                              )}
+                              <span className="font-mono font-bold text-amber-300">
+                                {pr.arenaScore}分
+                              </span>
+                              <span className="font-mono text-[10px] text-slate-400">
+                                Seed:{pr.seedId} · {pr.deliveriesCompleted}单 · ¥{pr.walletYuan.toFixed(1)} · {pr.recordedAt}
+                              </span>
+                            </div>
+                            {pr.auditSummary && (
+                              <div className="font-mono text-[10px] text-emerald-300/90">
+                                {pr.auditSummary}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={adminBusy}
+                              onClick={() => void handleModerateOp('approve', pr.id)}
+                              className="inline-flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-500"
+                            >
+                              <Check className="h-3 w-3" />
+                              通过上榜
+                            </button>
+                            <button
+                              type="button"
+                              disabled={adminBusy}
+                              onClick={() => void handleModerateOp('delete', pr.id)}
+                              className="inline-flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] text-rose-300 hover:bg-rose-500/30"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              驳回删除
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {adminFeedback && (
+                <div
+                  className={`mt-2.5 rounded-lg border px-3 py-1.5 text-[11px] ${
+                    adminFeedback.ok
+                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                      : 'border-rose-500/40 bg-rose-950/30 text-rose-200'
+                  }`}
+                >
+                  {adminFeedback.text}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Top Grid: 6D Radar + Live Telemetry Metrics */}
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
             {/* Radar Card */}
@@ -335,6 +684,9 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                   </span>
                   <span className="font-mono text-[11px] text-slate-400">
                     进度：{shift.elapsedMinutes}/180 分钟
+                    {(shift.debugToolCallsCount ?? 0) > 0 && (
+                      <span className="ml-1.5 text-rose-400">(含调试操作·不计入云榜)</span>
+                    )}
                   </span>
                 </div>
 
@@ -402,7 +754,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Save & Upload Run to Cloud Leaderboard Bar */}
+              {/* Save & Submit Run Bar */}
               <div className="mt-4 border-t border-slate-800 pt-3">
                 <div className="flex flex-wrap gap-2">
                   <input
@@ -426,30 +778,30 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                     className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-1.5 font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
                   >
                     <BookmarkPlus className="h-3.5 w-3.5" />
-                    上传当前战绩上云榜
+                    {adminUnlocked ? '直通发布上云榜' : '提交战绩申请上榜'}
                   </button>
                 </div>
-                {justSavedToast && (
+                {(justSavedToast || cloudStatus.lastSubmitNotice) && (
                   <p className="mt-2 text-[11px] font-medium text-emerald-300">
-                    ✓ {justSavedToast}
+                    ✓ {justSavedToast || cloudStatus.lastSubmitNotice}
                   </p>
                 )}
                 {cloudStatus.error && (
                   <p className="mt-1.5 text-[11px] text-rose-300">
-                    云端同步提示：{cloudStatus.error}（本地已自动备份）
+                    安全网关提示：{cloudStatus.error}
                   </p>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Bottom: Global Cloud Leaderboard Table */}
+          {/* Bottom: Global Approved Cloud Leaderboard Table */}
           <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Award className="h-4 w-4 text-amber-400" />
                 <span className="font-bold text-white">
-                  全网实时公共排行榜（自动汇集所有玩家跑完上传的大模型成绩）
+                  全网已过审公开排行榜（完赛自动反作弊校验 · 经管理员审核展示）
                 </span>
               </div>
 
@@ -462,7 +814,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                     className="inline-flex items-center gap-1 rounded-lg border border-sky-500/45 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-200 hover:bg-sky-500/25"
                   >
                     <CloudUpload className="h-3 w-3" />
-                    同步本地历史 ({unsyncedCount})
+                    同步本地记录 ({unsyncedCount})
                   </button>
                 )}
                 <button
@@ -504,13 +856,11 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
             {cloudStatus.loading && filteredRecords.length === 0 ? (
               <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-slate-800 py-10 text-slate-400">
                 <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
-                正在从 Supabase 云端拉取全网大模型战绩...
+                正在从 Supabase 云端拉取已审核大模型战绩...
               </div>
             ) : filteredRecords.length === 0 ? (
               <div className="rounded-lg border border-dashed border-slate-800 py-8 text-center text-slate-400">
-                {sameSeedOnly
-                  ? `种子 [${worldMap.seedId}] 暂无云端记录（可切换右上方「全网全部种子总榜」查看其它地图战绩，或跑完本局拿下首杀榜首！）`
-                  : '云端排行榜虚位以待！跑完 180 分钟班次将自动上云，或点击上方【上传当前战绩上云榜】抢占首个席位！'}
+                当前筛选下暂无已公开记录（跑满 180 分钟后自动提交审核；若你是站长，点击右上角【管理员审核】解锁后跑分可直接上榜！）。
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -518,7 +868,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400">
                       <th className="pb-2 pr-2">排名</th>
-                      <th className="pb-2 pr-3">评测模型 / 提交者</th>
+                      <th className="pb-2 pr-3">评测模型 / 状态</th>
                       <th className="pb-2 pr-2">模式 / 世界种子</th>
                       <th className="pb-2 pr-2">总分</th>
                       <th className="pb-2 pr-2">六维均分</th>
@@ -526,7 +876,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                       <th className="pb-2 pr-2">精准度</th>
                       <th className="pb-2 pr-2">净钱包</th>
                       <th className="pb-2 pr-2">Tokens</th>
-                      <th className="pb-2 text-right">同图挑战</th>
+                      <th className="pb-2 text-right">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/70">
@@ -561,18 +911,22 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                                   @{rec.playerTag}
                                 </span>
                               )}
-                              {rec.syncedToCloud ? (
-                                <span className="rounded bg-emerald-500/15 px-1 py-0.2 text-[9px] text-emerald-300">
-                                  ☁️云端
+                              {rec.moderationStatus === 'approved' ? (
+                                <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 text-[9px] text-emerald-300">
+                                  ✓已过审公开
+                                </span>
+                              ) : rec.moderationStatus === 'pending' ? (
+                                <span className="rounded bg-amber-500/15 px-1.5 py-0.2 text-[9px] text-amber-300">
+                                  ⏳待管理员审核
                                 </span>
                               ) : (
-                                <span className="rounded bg-amber-500/15 px-1 py-0.2 text-[9px] text-amber-300">
-                                  待同步
+                                <span className="rounded bg-slate-800 px-1.5 py-0.2 text-[9px] text-slate-400">
+                                  📌仅本地可见
                                 </span>
                               )}
                             </div>
                             <div className="mt-0.5 text-[10px] text-slate-500">
-                              {rec.recordedAt} · 跑满 {rec.elapsedMinutes}m · {rec.themeName}
+                              {rec.recordedAt} · {rec.elapsedMinutes}m · {rec.themeName}
                             </div>
                           </td>
                           <td className="py-2.5 pr-2">
@@ -614,16 +968,43 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                             {rec.totalTokens > 0 ? `${(rec.totalTokens / 1000).toFixed(1)}k` : '-'}
                           </td>
                           <td className="py-2.5 text-right">
-                            <button
-                              type="button"
-                              disabled={challengingId === rec.id}
-                              onClick={(e) => void handleChallengeSameWorld(rec, e)}
-                              title="一键载入该条记录同款地图、订单与局中事件种子，用你的模型同场对决！"
-                              className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-indigo-500/45 bg-indigo-500/15 px-2 py-1 text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/30"
-                            >
-                              <Swords className="h-3 w-3 text-indigo-300" />
-                              {challengingId === rec.id ? '载入中...' : '挑战同款种子'}
-                            </button>
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={challengingId === rec.id}
+                                onClick={(e) => void handleChallengeSameWorld(rec, e)}
+                                title="一键载入同款地图、订单与局中事件种子，用你的模型同场对决！"
+                                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-indigo-500/45 bg-indigo-500/15 px-2 py-1 text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/30"
+                              >
+                                <Swords className="h-3 w-3 text-indigo-300" />
+                                {challengingId === rec.id ? '载入中' : '挑战同种子'}
+                              </button>
+                              {adminUnlocked && rec.syncedToCloud ? (
+                                <button
+                                  type="button"
+                                  disabled={adminBusy}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleModerateOp('delete', rec.id);
+                                  }}
+                                  title="从云端数据库物理删除该条公开记录"
+                                  className="rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-1 text-[10px] text-rose-300 hover:bg-rose-500/30"
+                                >
+                                  云端删除
+                                </button>
+                              ) : rec.isLocalOwner && !rec.syncedToCloud ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    benchmarkStore.deleteLocalRecord(rec.id);
+                                  }}
+                                  className="text-[10px] text-slate-500 hover:text-rose-400"
+                                >
+                                  删本地
+                                </button>
+                              ) : null}
+                            </div>
                           </td>
                         </tr>
                       );

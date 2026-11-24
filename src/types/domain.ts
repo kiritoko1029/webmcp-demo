@@ -227,6 +227,8 @@ export interface GameShiftState {
   safeDetoursCount: number;
   hazardsHitCount: number;
   batteryBreakdownsCount: number;
+  debugToolCallsCount?: number;
+  actionTrace?: Array<{ tool: string; t: string }>;
 }
 
 export interface WorldEventLog {

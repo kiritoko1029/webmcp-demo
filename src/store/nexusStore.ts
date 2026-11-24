@@ -575,14 +575,26 @@ export const nexusStore = {
     );
   },
 
-  recordToolTelemetry(ok: boolean) {
+  recordToolTelemetry(ok: boolean, toolName?: string, countAgentCall = true) {
+    const isDebug = Boolean(toolName?.startsWith('debug.'));
+    const nextTrace =
+      ok && toolName
+        ? [
+            ...(state.shift.actionTrace ?? []),
+            { tool: toolName, t: formatShiftClock(state.shift.elapsedMinutes) },
+          ].slice(-380)
+        : (state.shift.actionTrace ?? []);
+
     commitState(
       {
         ...state,
         shift: {
           ...state.shift,
-          totalToolCalls: state.shift.totalToolCalls + 1,
-          failedToolCalls: state.shift.failedToolCalls + (ok ? 0 : 1),
+          totalToolCalls: state.shift.totalToolCalls + (countAgentCall ? 1 : 0),
+          failedToolCalls: state.shift.failedToolCalls + (countAgentCall && !ok ? 1 : 0),
+          debugToolCallsCount:
+            (state.shift.debugToolCallsCount ?? 0) + (ok && isDebug ? 1 : 0),
+          actionTrace: nextTrace,
         },
       },
       true,
