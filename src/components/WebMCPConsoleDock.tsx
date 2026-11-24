@@ -29,8 +29,8 @@ import {
   buildPlaybookSummaryText,
   formatReasoningEffortTag,
   type LlmConnectionConfig,
-  REASONING_EFFORT_OPTIONS,
-  type ReasoningEffortLevel,
+  normalizeReasoningEffort,
+  REASONING_EFFORT_SUGGESTIONS,
   runAutonomousArenaRound,
   runNaturalLanguageWebMCPTurn,
   type TurnToolCallLog,
@@ -74,7 +74,7 @@ const DEFAULT_LLM_CONFIG: LlmConnectionConfig = {
   baseUrl: 'https://api.openai.com/v1',
   apiKey: '',
   model: 'gpt-4.1-mini',
-  reasoningEffort: 'default',
+  reasoningEffort: '',
 };
 
 const WELCOME_MESSAGE: AgentChatMessage = {
@@ -97,7 +97,7 @@ function loadSavedLlmConfig(): LlmConnectionConfig {
       baseUrl: parsed.baseUrl ?? DEFAULT_LLM_CONFIG.baseUrl,
       apiKey: parsed.apiKey ?? '',
       model: parsed.model ?? DEFAULT_LLM_CONFIG.model,
-      reasoningEffort: parsed.reasoningEffort ?? 'default',
+      reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
     };
   } catch {
     return DEFAULT_LLM_CONFIG;
@@ -787,27 +787,29 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
                 </button>
               </div>
 
-              {/* Reasoning Effort Quick Switcher + Context Management Strip */}
+              {/* Reasoning Effort Free-Form Quick Input + Context Management Strip */}
               <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-lg border border-slate-800/90 bg-slate-900/80 px-2.5 py-1 text-[11px]">
                 <div className="flex flex-wrap items-center gap-1.5 text-slate-300">
-                  <span className="text-[10px] font-semibold text-amber-300">思考程度:</span>
-                  <select
-                    value={llmConfig.reasoningEffort ?? 'default'}
+                  <span className="text-[10px] font-semibold text-amber-300">思考:</span>
+                  <input
+                    type="text"
+                    list="console-effort-hints"
+                    value={llmConfig.reasoningEffort ?? ''}
                     onChange={(e) =>
                       setLlmConfig((prev) => ({
                         ...prev,
-                        reasoningEffort: e.target.value as ReasoningEffortLevel,
+                        reasoningEffort: e.target.value,
                       }))
                     }
-                    title="快速切换外卖员大模型思考深度 (reasoning.effort / thinking)"
-                    className="rounded border border-amber-500/35 bg-slate-950 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-200 focus:border-amber-400 focus:outline-none"
-                  >
-                    {REASONING_EFFORT_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.shortLabel}
-                      </option>
+                    placeholder="默认(可填max/high...)"
+                    title="自由输入模型支持的思考程度 (如 max / xhigh / high / medium / low / none / disabled；留空跟随默认)"
+                    className="w-28 rounded border border-amber-500/35 bg-slate-950 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-200 placeholder:font-sans placeholder:font-normal placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
+                  />
+                  <datalist id="console-effort-hints">
+                    {REASONING_EFFORT_SUGGESTIONS.map((val) => (
+                      <option key={val} value={val} />
                     ))}
-                  </select>
+                  </datalist>
                   <span className="text-slate-700">|</span>
                   <span className="font-mono text-[10px]">
                     上下文 {session.turns.length}/{session.maxWindowTurns}轮

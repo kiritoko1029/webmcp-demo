@@ -208,24 +208,25 @@ export interface AgentChatMessage {
   tokenBadge?: string;
 }
 
-export type ReasoningEffortLevel = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high';
+export const REASONING_EFFORT_SUGGESTIONS = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'disabled',
+] as const;
 
-export const REASONING_EFFORT_OPTIONS: Array<{
-  value: ReasoningEffortLevel;
-  shortLabel: string;
-  fullLabel: string;
-}> = [
-  { value: 'default', shortLabel: '默认', fullLabel: '跟随模型默认 (Default)' },
-  { value: 'none', shortLabel: '关闭思考', fullLabel: '关闭思考 (none/disabled · 极速省Token)' },
-  { value: 'minimal', shortLabel: '极简', fullLabel: '极简思考 (minimal · GPT-5系列)' },
-  { value: 'low', shortLabel: '低(Low)', fullLabel: '低度思考 (low · 快速决策)' },
-  { value: 'medium', shortLabel: '中(Med)', fullLabel: '中度思考 (medium · 均衡推理)' },
-  { value: 'high', shortLabel: '高(High)', fullLabel: '深度思考 (high · 极限运筹规划)' },
-];
+export function normalizeReasoningEffort(raw?: string): string {
+  const trimmed = (raw ?? '').trim();
+  return trimmed === 'default' ? '' : trimmed;
+}
 
-export function formatReasoningEffortTag(effort?: ReasoningEffortLevel): string {
-  const found = REASONING_EFFORT_OPTIONS.find((o) => o.value === (effort ?? 'default'));
-  return found ? found.shortLabel : '默认';
+export function formatReasoningEffortTag(effort?: string): string {
+  const clean = normalizeReasoningEffort(effort);
+  return clean || '默认';
 }
 
 export interface LlmConnectionConfig {
@@ -234,7 +235,7 @@ export interface LlmConnectionConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
-  reasoningEffort?: ReasoningEffortLevel;
+  reasoningEffort?: string;
 }
 
 interface ResponsesApiPayload {
@@ -387,22 +388,40 @@ async function sendSingleResponsesFetch(
 }
 
 /**
- * Sends a `/v1/responses` request with `reasoning.effort` (or `thinking: { type: "disabled" }`)
- * and gracefully auto-fallbacks if the target model does not support that reasoning parameter!
+ * Sends a `/v1/responses` request passing any custom user-entered `reasoning.effort` string
+ * (e.g. `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none`, `disabled`, or custom gateway strings!).
  */
 export async function postResponsesRequest(
   endpoint: string,
   apiKey: string,
   baseBody: Record<string, unknown>,
   signal?: AbortSignal,
-  reasoningEffort: ReasoningEffortLevel = 'default',
+  reasoningEffort?: string,
 ): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
-  if (!reasoningEffort || reasoningEffort === 'default') {
+  const cleanEffort = normalizeReasoningEffort(reasoningEffort);
+  if (!cleanEffort) {
     return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
   }
 
-  if (reasoningEffort === 'none') {
-    // Try OpenAI GPT-5.1+ / OpenRouter `reasoning: { effort: "none" }` first
+  const lower = cleanEffort.toLowerCase();
+
+  if (lower === 'disabled') {
+    const r1 = await sendSingleResponsesFetch(
+      endpoint,
+      apiKey,
+      { ...baseBody, thinking: { type: 'disabled' } },
+      signal,
+    );
+    if (r1.ok || (r1.status !== 400 && r1.status !== 422)) return r1;
+    return await sendSingleResponsesFetch(
+      endpoint,
+      apiKey,
+      { ...baseBody, reasoning: { effort: 'none' } },
+      signal,
+    );
+  }
+
+  if (lower === 'none') {
     const r1 = await sendSingleResponsesFetch(
       endpoint,
       apiKey,
@@ -410,48 +429,36 @@ export async function postResponsesRequest(
       signal,
     );
     if (r1.ok || (r1.status !== 400 && r1.status !== 422)) return r1;
-    if (!/reasoning|effort|none|unsupported|unknown|invalid/i.test(r1.errText)) return r1;
-
-    // Fallback to DeepSeek / Volcengine Ark `thinking: { type: "disabled" }`
-    const r2 = await sendSingleResponsesFetch(
-      endpoint,
-      apiKey,
-      { ...baseBody, thinking: { type: 'disabled' } },
-      signal,
-    );
-    if (r2.ok || (r2.status !== 400 && r2.status !== 422)) return r2;
-    if (!/thinking|disabled|unsupported|unknown|invalid/i.test(r2.errText)) return r2;
-
-    // Final fallback for pure non-reasoning models (e.g. gpt-4.1-mini) where thinking is already off
-    return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
+    if (/reasoning|effort|none|unsupported|unknown|invalid/i.test(r1.errText)) {
+      const r2 = await sendSingleResponsesFetch(
+        endpoint,
+        apiKey,
+        { ...baseBody, thinking: { type: 'disabled' } },
+        signal,
+      );
+      if (r2.ok) return r2;
+    }
+    return r1;
   }
 
-  // `minimal` | `low` | `medium` | `high`
-  const rEffort = await sendSingleResponsesFetch(
+  // Pass the exact user-specified effort string (`max`, `xhigh`, `high`, `medium`, `low`, etc.) verbatim!
+  const rCustom = await sendSingleResponsesFetch(
     endpoint,
     apiKey,
-    { ...baseBody, reasoning: { effort: reasoningEffort } },
+    { ...baseBody, reasoning: { effort: cleanEffort } },
     signal,
   );
-  if (rEffort.ok || (rEffort.status !== 400 && rEffort.status !== 422)) return rEffort;
+  if (rCustom.ok) return rCustom;
 
-  // If `minimal` is unsupported on o3/o4-mini/DeepSeek, try `low` before stripping
-  if (reasoningEffort === 'minimal' && /minimal|effort|invalid|unsupported/i.test(rEffort.errText)) {
-    const rLow = await sendSingleResponsesFetch(
-      endpoint,
-      apiKey,
-      { ...baseBody, reasoning: { effort: 'low' } },
-      signal,
-    );
-    if (rLow.ok) return rLow;
-  }
-
-  // If model is a non-reasoning model that rejects `reasoning`, fallback cleanly without crashing
-  if (/reasoning|effort|unsupported|unknown/i.test(rEffort.errText)) {
+  // Only fallback without `reasoning` if the model doesn't recognize the `reasoning` parameter at all
+  if (
+    (rCustom.status === 400 || rCustom.status === 422) &&
+    /unknown parameter.*reasoning|unrecognized.*reasoning/i.test(rCustom.errText)
+  ) {
     return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
   }
 
-  return rEffort;
+  return rCustom;
 }
 
 export async function testLlmEndpointConnection(

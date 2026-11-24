@@ -12,8 +12,8 @@ import type {
 } from '../types/domain';
 import {
   formatReasoningEffortTag,
+  normalizeReasoningEffort,
   postResponsesRequest,
-  type ReasoningEffortLevel,
 } from './agentPlaybooks';
 import {
   createSeededRng,
@@ -31,7 +31,7 @@ export interface WorldModelConfig {
   apiKey: string;
   model: string;
   difficulty: WorldDifficulty;
-  reasoningEffort?: ReasoningEffortLevel;
+  reasoningEffort?: string;
 }
 
 const WORLD_LLM_STORAGE_KEY = 'ridergo_world_llm_config_v1';
@@ -43,7 +43,7 @@ const DEFAULT_WORLD_CONFIG: WorldModelConfig = {
   apiKey: '',
   model: 'gpt-4.1-mini',
   difficulty: 'hardcore',
-  reasoningEffort: 'default',
+  reasoningEffort: '',
 };
 
 function loadWorldConfig(): WorldModelConfig {
@@ -59,7 +59,7 @@ function loadWorldConfig(): WorldModelConfig {
       apiKey: parsed.apiKey ?? '',
       model: parsed.model ?? DEFAULT_WORLD_CONFIG.model,
       difficulty: parsed.difficulty ?? 'hardcore',
-      reasoningEffort: parsed.reasoningEffort ?? 'default',
+      reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
     };
   } catch {
     return DEFAULT_WORLD_CONFIG;

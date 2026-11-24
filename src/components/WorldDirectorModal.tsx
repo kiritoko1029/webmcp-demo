@@ -21,8 +21,7 @@ import {
 import { nexusStore, useNexusStore } from '../store/nexusStore';
 import {
   type LlmConnectionConfig,
-  REASONING_EFFORT_OPTIONS,
-  type ReasoningEffortLevel,
+  REASONING_EFFORT_SUGGESTIONS,
   resolveResponsesEndpoint,
   testLlmEndpointConnection,
 } from '../webmcp/agentPlaybooks';
@@ -632,28 +631,52 @@ export const WorldDirectorModal: React.FC<Props> = ({
                     />
                   </label>
 
-                  <label className="space-y-1 sm:col-span-2">
+                  <label className="space-y-1.5 sm:col-span-2">
                     <div className="flex justify-between text-[11px] text-slate-400">
-                      <span>导演思考程度 (Reasoning Effort)</span>
-                      <span className="text-[10px] text-indigo-300">
-                        生图建城推荐 中/高 · NPC快速互动推荐 关闭/低
+                      <span>导演思考程度 (Reasoning Effort · 自由填写，留空为模型默认)</span>
+                      <span className="font-mono text-[10px] text-indigo-300">
+                        {worldCfg.reasoningEffort?.trim()
+                          ? `reasoning.effort = "${worldCfg.reasoningEffort.trim()}"`
+                          : '不传该参数 (跟随默认)'}
                       </span>
                     </div>
-                    <select
-                      value={worldCfg.reasoningEffort ?? 'default'}
-                      onChange={(e) =>
-                        worldModelStore.update({
-                          reasoningEffort: e.target.value as ReasoningEffortLevel,
-                        })
-                      }
-                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-slate-200"
-                    >
-                      {REASONING_EFFORT_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.fullLabel}
-                        </option>
+                    <input
+                      type="text"
+                      list="world-effort-suggestions"
+                      value={worldCfg.reasoningEffort ?? ''}
+                      onChange={(e) => worldModelStore.update({ reasoningEffort: e.target.value })}
+                      placeholder="自由填写如: max / xhigh / high / medium / low / minimal / none / disabled (留空则默认)"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-slate-100 placeholder:font-sans placeholder:text-slate-500"
+                    />
+                    <datalist id="world-effort-suggestions">
+                      {REASONING_EFFORT_SUGGESTIONS.map((val) => (
+                        <option key={val} value={val} />
                       ))}
-                    </select>
+                    </datalist>
+                    <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                      <span className="text-[10px] text-slate-500">快捷填入:</span>
+                      <button
+                        type="button"
+                        onClick={() => worldModelStore.update({ reasoningEffort: '' })}
+                        className="rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 hover:text-white"
+                      >
+                        清空(默认)
+                      </button>
+                      {REASONING_EFFORT_SUGGESTIONS.map((val) => (
+                        <button
+                          key={val}
+                          type="button"
+                          onClick={() => worldModelStore.update({ reasoningEffort: val })}
+                          className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                            worldCfg.reasoningEffort === val
+                              ? 'border-indigo-400 bg-indigo-500/20 text-indigo-200'
+                              : 'border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          {val}
+                        </button>
+                      ))}
+                    </div>
                   </label>
                 </div>
 
@@ -782,31 +805,59 @@ export const WorldDirectorModal: React.FC<Props> = ({
                   />
                 </label>
 
-                <label className="space-y-1 sm:col-span-2">
+                <label className="space-y-1.5 sm:col-span-2">
                   <div className="flex justify-between text-[11px] text-slate-400">
                     <span className="font-semibold text-amber-300">
-                      外卖员模型思考程度 (Reasoning Effort · 支持同模型不同思考强度打榜对比!)
+                      外卖员模型思考程度 (Reasoning Effort · 支持任意自定义档位如 max / xhigh / high / none)
                     </span>
-                    <span className="text-[10px] text-slate-400">
-                      若模型不支持该参数将自动无损回退
+                    <span className="font-mono text-[10px] text-amber-300">
+                      {riderLlmConfig.reasoningEffort?.trim()
+                        ? `reasoning.effort = "${riderLlmConfig.reasoningEffort.trim()}"`
+                        : '不传该参数 (跟随默认)'}
                     </span>
                   </div>
-                  <select
-                    value={riderLlmConfig.reasoningEffort ?? 'default'}
+                  <input
+                    type="text"
+                    list="rider-effort-suggestions"
+                    value={riderLlmConfig.reasoningEffort ?? ''}
                     onChange={(e) =>
                       onChangeRiderLlm((c) => ({
                         ...c,
-                        reasoningEffort: e.target.value as ReasoningEffortLevel,
+                        reasoningEffort: e.target.value,
                       }))
                     }
-                    className="w-full rounded-lg border border-amber-500/40 bg-slate-900 px-2.5 py-1.5 font-medium text-amber-200"
-                  >
-                    {REASONING_EFFORT_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.fullLabel}
-                      </option>
+                    placeholder="自由输入模型支持的任意值，如: max / xhigh / high / medium / low / minimal / none / disabled (留空则默认)"
+                    className="w-full rounded-lg border border-amber-500/40 bg-slate-900 px-3 py-1.5 font-mono text-amber-200 placeholder:font-sans placeholder:text-slate-500"
+                  />
+                  <datalist id="rider-effort-suggestions">
+                    {REASONING_EFFORT_SUGGESTIONS.map((val) => (
+                      <option key={val} value={val} />
                     ))}
-                  </select>
+                  </datalist>
+                  <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                    <span className="text-[10px] text-slate-500">快捷填入:</span>
+                    <button
+                      type="button"
+                      onClick={() => onChangeRiderLlm((c) => ({ ...c, reasoningEffort: '' }))}
+                      className="rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] text-slate-400 hover:text-white"
+                    >
+                      清空(默认)
+                    </button>
+                    {REASONING_EFFORT_SUGGESTIONS.map((val) => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => onChangeRiderLlm((c) => ({ ...c, reasoningEffort: val }))}
+                        className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                          riderLlmConfig.reasoningEffort === val
+                            ? 'border-amber-400 bg-amber-500/20 font-bold text-amber-200'
+                            : 'border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        {val}
+                      </button>
+                    ))}
+                  </div>
                 </label>
 
                 <label className="space-y-1">
