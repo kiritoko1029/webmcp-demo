@@ -19,13 +19,18 @@ import type {
 } from '../types/domain';
 import {
   createInitialOrders,
-  createInitialRider,
   createInitialShift,
   createInitialWorldMap,
   INITIAL_ISSUE_REPORTS,
   INITIAL_WITHDRAWALS,
   INITIAL_WORLD_EVENTS,
 } from './initialData';
+import {
+  buildSeededInitialRider,
+  computeSeededMilestoneEvent,
+  SCHEDULED_CLOCK_MILESTONES,
+  synthesizeDeterministicOrdersForMap,
+} from './seededWorldEngine';
 
 const WORKSPACE_STORAGE_KEY = 'ridergo_arena_state_v2';
 
@@ -172,14 +177,15 @@ type PersistedSlice = Pick<
 >;
 
 function createFreshDefaultState(): NexusState {
-  const rider = createInitialRider();
   const orders = createInitialOrders();
   const baseMap = createInitialWorldMap();
   const worldMap: WorldMapConfig = {
     ...baseMap,
     initialOrdersSnapshot: orders.map((o) => ({ ...o, items: [...o.items] })),
     waveCount: 0,
+    triggeredClockMilestones: [],
   };
+  const rider = buildSeededInitialRider(worldMap);
   return {
     activeModule: 'dispatch',
     toolScopeMode: 'global',
@@ -339,7 +345,10 @@ export const nexusStore = {
 
   /**
    * Advances simulation game clock by `minutes`!
-   * Decrements restaurant prep timers, order SLA countdowns, and ice-drink thermal decay if un-upgraded.
+   * - Decrements restaurant prep timers, order SLA countdowns, and ice-drink thermal decay if un-upgraded.
+   * - Synchronously triggers 100% seed-deterministic scheduled order waves & weather events at fixed
+   *   clock milestones (`[35, 75, 115, 150]` min), applying exact overshoot ticks so every Rider Model
+   *   encounters the exact same orders & events at the exact same game times!
    */
   advanceGameClock(minutes: number) {
     if (minutes <= 0) return;
@@ -351,12 +360,10 @@ export const nexusStore = {
         );
         const shiftEnded = nextElapsed >= state.shift.totalShiftMinutes;
 
-        const nextOrders = state.orders.map((o) => {
+        let nextOrders = state.orders.map((o) => {
           if (o.stage === 'delivered' || o.stage === 'dropped') return o;
           const nextPrep = Math.max(0, o.prepMinutesRemaining - minutes);
-          // Active orders & pool orders tick down SLA; pool orders expire if <= -5
           const nextLeft = o.minutesLeft - minutes;
-          // Ice drinks slowly melt if delivering without thermal expandedBox upgrade
           const meltLoss =
             o.stage === 'delivering' &&
             o.fragileTag === 'ice_drink' &&
@@ -375,8 +382,92 @@ export const nexusStore = {
           };
         });
 
+        let nextWeather = state.rider.weather;
+        let nextWaveCount = state.worldMap.waveCount ?? 0;
+        const nextTriggered = [...(state.worldMap.triggeredClockMilestones ?? [])];
+        const addedWorldEvents: WorldEventLog[] = [];
+        const addedLiveActions: LiveActionEntry[] = [];
+
+        if (!shiftEnded) {
+          for (const ms of SCHEDULED_CLOCK_MILESTONES) {
+            if (nextElapsed >= ms.minute && !nextTriggered.includes(ms.minute)) {
+              nextTriggered.push(ms.minute);
+              nextWaveCount += 1;
+
+              const ev = computeSeededMilestoneEvent({
+                seedId: state.worldMap.seedId,
+                milestoneMinute: ms.minute,
+                milestoneLabel: ms.label,
+                currentWeather: nextWeather,
+              });
+              nextWeather = ev.nextWeather;
+
+              // Apply milestone pool subsidy to existing pool orders
+              nextOrders = nextOrders.map((o) =>
+                o.stage === 'pool'
+                  ? { ...o, feeYuan: Number((o.feeYuan + ev.feeDeltaYuan).toFixed(1)) }
+                  : o,
+              );
+
+              // Synthesize deterministic wave orders and tick exact overshoot minutes past milestone
+              const overshoot = Math.max(0, nextElapsed - ms.minute);
+              const rawWave = synthesizeDeterministicOrdersForMap({
+                map: state.worldMap,
+                count: ms.orderCount,
+                waveKey: `CLOCK-WAVE-${ms.minute}`,
+                waveIndex: nextWaveCount,
+              }).map((wo) => {
+                const postLeft = wo.minutesLeft - overshoot;
+                return {
+                  ...wo,
+                  feeYuan: Number((wo.feeYuan + ev.feeDeltaYuan).toFixed(1)),
+                  prepMinutesRemaining: Math.max(0, wo.prepMinutesRemaining - overshoot),
+                  minutesLeft: postLeft,
+                  customerMood: (postLeft <= 4
+                    ? 'angry'
+                    : postLeft <= 12
+                      ? 'anxious'
+                      : 'calm') as DeliveryOrder['customerMood'],
+                };
+              });
+
+              nextOrders = [...nextOrders, ...rawWave];
+              const msClockLabel = formatShiftClock(ms.minute);
+
+              addedWorldEvents.unshift({
+                id: `WEV-MS-${ms.minute}`,
+                gameTimeLabel: msClockLabel,
+                title: `${ev.title} · 新刷 ${rawWave.length} 笔同种子悬赏单`,
+                detail: `${ev.detail}；新增订单：${rawWave.map((o) => `${o.orderId}(${o.merchantName})`).join('、')}`,
+                source: 'game_engine',
+                severity: ev.nextWeather === 'heavy_rain' ? 'warn' : 'bonus',
+              });
+
+              addedLiveActions.unshift({
+                id: `ACT-MS-${ms.minute}`,
+                gameTimeLabel: msClockLabel,
+                wallTime: new Date().toTimeString().slice(0, 8),
+                actor: '世界导演',
+                toolName: `seed.milestone_${ms.minute}m`,
+                category: 'observe',
+                headline: `${ms.label}：新增 ${rawWave.map((o) => o.orderId).join('、')}`,
+                badges: [`天气:${ev.nextWeather}`, `补贴+¥${ev.feeDeltaYuan}`, `+${rawWave.length}单`],
+              });
+            }
+          }
+        }
+
         return {
           ...state,
+          worldMap: {
+            ...state.worldMap,
+            waveCount: nextWaveCount,
+            triggeredClockMilestones: nextTriggered,
+          },
+          rider: {
+            ...state.rider,
+            weather: nextWeather,
+          },
           shift: {
             ...state.shift,
             elapsedMinutes: nextElapsed,
@@ -384,10 +475,52 @@ export const nexusStore = {
           },
           orders: nextOrders,
           plannedStops: buildDefaultStops(nextOrders, state.rider.pos),
+          worldEvents: [...addedWorldEvents, ...state.worldEvents].slice(0, 30),
+          liveActionFeed: [...addedLiveActions, ...state.liveActionFeed].slice(0, 35),
         };
       })(),
       true,
     );
+  },
+
+  /**
+   * Synchronous, 100% seed-locked anti-starvation replenishment if a fast rider clears all active + pool orders
+   * before the next scheduled clock milestone!
+   */
+  ensurePlayableOrdersFromSeed(): string[] {
+    if (state.shift.shiftEnded) return [];
+    const playable = state.orders.filter((o) => o.stage !== 'delivered' && o.stage !== 'dropped');
+    if (playable.length > 0) return [];
+
+    const nextWaveIdx = (state.worldMap.waveCount ?? 0) + 1;
+    const spawned = synthesizeDeterministicOrdersForMap({
+      map: state.worldMap,
+      count: 3,
+      waveKey: `SEED-REPLENISH-${nextWaveIdx}`,
+      waveIndex: nextWaveIdx,
+    });
+
+    commitState(
+      {
+        ...state,
+        worldMap: { ...state.worldMap, waveCount: nextWaveIdx },
+        orders: [...state.orders, ...spawned],
+        plannedStops: buildDefaultStops([...state.orders, ...spawned], state.rider.pos),
+        worldEvents: [
+          {
+            id: `WEV-REP-${nextWaveIdx}`,
+            gameTimeLabel: formatShiftClock(state.shift.elapsedMinutes),
+            title: `清台加急补单 (+${spawned.length} 单种子锁定悬赏)`,
+            detail: `骑手已清空当前订单，按世界种子确定性派发：${spawned.map((o) => `${o.orderId}(${o.merchantName})`).join('、')}`,
+            source: 'game_engine' as const,
+            severity: 'info' as const,
+          },
+          ...state.worldEvents,
+        ].slice(0, 30),
+      },
+      true,
+    );
+    return spawned.map((o) => o.orderId);
   },
 
   appendWorldEvent(ev: Omit<WorldEventLog, 'id' | 'gameTimeLabel'>) {
@@ -565,12 +698,7 @@ export const nexusStore = {
           }))
         : createInitialOrders();
 
-    const freshRider: RiderProfile = {
-      ...createInitialRider(),
-      weather: curMap.initialWeather ?? 'sunny',
-      pos: { x: 265, y: curMap.roadsH[1]?.y ?? 210 },
-      currentArea: curMap.roadsH[1]?.name ?? '中心出发点',
-    };
+    const freshRider: RiderProfile = buildSeededInitialRider(curMap);
 
     const freshShift: GameShiftState = {
       ...createInitialShift(),
@@ -583,7 +711,7 @@ export const nexusStore = {
     commitState(
       {
         ...state,
-        worldMap: { ...curMap, waveCount: 0 },
+        worldMap: { ...curMap, waveCount: 0, triggeredClockMilestones: [] },
         rider: freshRider,
         shift: freshShift,
         orders: restoredOrders,

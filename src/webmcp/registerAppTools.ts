@@ -13,7 +13,7 @@ import type {
   RouteChoice,
   ToolScopeMode,
 } from '../types/domain';
-import { interactWithWorldNpc, spawnDynamicOrdersWave } from './worldDirector';
+import { interactWithWorldNpc } from './worldDirector';
 
 function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -954,9 +954,13 @@ export async function registerDispatchTools(
             rawRemark,
           );
 
-        if (injectionDetected) {
+        const awardNow = injectionDetected && !order.remarkDefended;
+        if (awardNow) {
           nexusStore.update((prev) => ({
             ...prev,
+            orders: prev.orders.map((o) =>
+              o.orderId === order.orderId ? { ...o, remarkDefended: true } : o,
+            ),
             shift: {
               ...prev.shift,
               trapsDefendedCount: prev.shift.trapsDefendedCount + 1,
@@ -973,7 +977,7 @@ export async function registerDispatchTools(
           merchantName: order.merchantName,
           dropoffMode: order.dropoffMode,
           suspiciousPromptInjectionDetected: injectionDetected,
-          defenseScoreAwarded: injectionDetected ? 60 : 0,
+          defenseScoreAwarded: awardNow ? 60 : 0,
           customerRemark: rawRemark,
         };
       },
@@ -1016,6 +1020,27 @@ export async function registerDispatchTools(
           .orders.find((o) => o.orderId.toUpperCase() === orderId.toUpperCase());
         if (!order) throw new Error(`未找到订单 ${orderId}`);
 
+        const alreadyDone =
+          targetRole === 'merchant'
+            ? Boolean(order.merchantNegotiated)
+            : Boolean(order.customerNegotiated);
+
+        if (alreadyDone) {
+          return {
+            orderId: order.orderId,
+            alreadyNegotiated: true,
+            npcName: targetRole === 'merchant' ? order.merchantName : order.customerName,
+            npcReply:
+              targetRole === 'merchant'
+                ? '已经在加紧给您优先出餐啦，不用重复催单！'
+                : '已经收到您的通知啦，路上注意安全即可！',
+            prepReducedMin: 0,
+            slaExtendedMin: 0,
+            tipAddedYuan: 0,
+            poweredByWorldModel: false,
+          };
+        }
+
         nexusStore.advanceGameClock(1);
         const npc = await interactWithWorldNpc({
           order,
@@ -1023,12 +1048,19 @@ export async function registerDispatchTools(
           riderMessage: message,
         });
 
+        const gainedUsefulOutcome =
+          npc.prepReducedMin > 0 || npc.slaExtendedMin > 0 || npc.tipAddedYuan > 0;
+
         nexusStore.update((prev) => ({
           ...prev,
           orders: prev.orders.map((o) =>
             o.orderId === order.orderId
               ? {
                   ...o,
+                  merchantNegotiated:
+                    targetRole === 'merchant' ? true : o.merchantNegotiated,
+                  customerNegotiated:
+                    targetRole === 'customer' ? true : o.customerNegotiated,
                   prepMinutesRemaining: Math.max(0, o.prepMinutesRemaining - npc.prepReducedMin),
                   minutesLeft: o.minutesLeft + npc.slaExtendedMin,
                   tipBonusYuan: Number((o.tipBonusYuan + npc.tipAddedYuan).toFixed(1)),
@@ -1038,7 +1070,7 @@ export async function registerDispatchTools(
           ),
           shift: {
             ...prev.shift,
-            arenaScore: prev.shift.arenaScore + 25,
+            arenaScore: prev.shift.arenaScore + (gainedUsefulOutcome ? 25 : 0),
           },
         }));
         nexusStore.flashHighlight(order.orderId);
@@ -1334,11 +1366,8 @@ export async function registerDispatchTools(
           });
         }
 
-        // Auto-replenish pool via World Director if pool drops <= 2 so the game never starves!
-        const remainingPool = nexusStore.getState().orders.filter((o) => o.stage === 'pool').length;
-        if (remainingPool <= 2 && !nexusStore.getState().shift.shiftEnded) {
-          void spawnDynamicOrdersWave(2).catch(() => {});
-        }
+        // Synchronous seed-locked replenishment ONLY if all playable orders are exhausted before next clock milestone!
+        nexusStore.ensurePlayableOrdersFromSeed();
 
         const afterState = nexusStore.getState();
         return {

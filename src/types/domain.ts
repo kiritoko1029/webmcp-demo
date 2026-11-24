@@ -68,12 +68,17 @@ export interface WorldStation {
   pos: MapPoint;
 }
 
+export type WorldDifficultyLevel = 'standard' | 'hardcore' | 'chaos';
+
 export interface WorldMapConfig {
   seedId: string;
   themeName: string;
   themeDescription: string;
   generatedByModel: string;
+  difficulty?: WorldDifficultyLevel;
   initialWeather?: 'sunny' | 'heavy_rain' | 'gale_wind';
+  initialRiderPos?: MapPoint;
+  initialRiderArea?: string;
   initialQuest?: {
     title: string;
     targetDeliveries: number;
@@ -81,6 +86,7 @@ export interface WorldMapConfig {
   };
   initialOrdersSnapshot?: DeliveryOrder[];
   waveCount?: number;
+  triggeredClockMilestones?: number[];
   roadsH: Array<{ y: number; name: string }>;
   roadsV: Array<{ x: number; name: string }>;
   hazards: WorldHazardZone[];
@@ -120,6 +126,9 @@ export interface DeliveryOrder {
   distanceKm: number;
   minutesLeft: number;
   slaExtendedOnce?: boolean;
+  remarkDefended?: boolean;
+  merchantNegotiated?: boolean;
+  customerNegotiated?: boolean;
   stage: OrderStage;
   customerMood: 'calm' | 'anxious' | 'angry';
 

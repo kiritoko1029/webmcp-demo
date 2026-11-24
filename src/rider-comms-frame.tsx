@@ -52,6 +52,16 @@ const INITIAL_LOCKERS: LockerSite[] = [
 
 const COMMS_STORAGE_KEY = 'ridergo_comms_frame_v1';
 
+function deterministicLockerCode(siteId: string, orderId: string): string {
+  let h = 2166136261 >>> 0;
+  const key = `${siteId}::${orderId.toUpperCase()}`;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return String(1000 + (h % 9000));
+}
+
 const INITIAL_CHATS: ChatLog[] = [
   {
     id: 'c-init',
@@ -211,7 +221,7 @@ function RiderCommsFrameApp() {
             };
             const target = lockersState.find((l) => l.siteId === siteId) ?? lockersState[0];
             const boxNo = `${useHeatedSlot ? 'H' : 'S'}0${target.occupiedBoxes.length + 3}`;
-            const pickupCode = String(Math.floor(1000 + Math.random() * 8999));
+            const pickupCode = deterministicLockerCode(target.siteId, orderId);
             const storedAt = new Date().toTimeString().slice(0, 5);
             const receipt = `${target.buildingName} ${boxNo}格 (取餐码 ${pickupCode})`;
 
@@ -314,7 +324,7 @@ function RiderCommsFrameApp() {
 
   const handleManualStore = () => {
     const boxNo = `H0${currentSite.occupiedBoxes.length + 5}`;
-    const pickupCode = String(Math.floor(1000 + Math.random() * 8999));
+    const pickupCode = deterministicLockerCode(currentSite.siteId, orderIdInput);
     const receipt = `${currentSite.buildingName} ${boxNo}格 (取餐码 ${pickupCode})`;
     const next = lockers.map((l) =>
       l.siteId === currentSite.siteId

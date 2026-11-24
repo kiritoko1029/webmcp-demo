@@ -43,11 +43,7 @@ import {
   type DiscoveredToolItem,
   executeWebMCPByName,
 } from '../webmcp/useWebMCPBridge';
-import {
-  spawnDynamicOrdersWave,
-  triggerSuddenWorldEvent,
-  useWorldModelConfig,
-} from '../webmcp/worldDirector';
+import { useWorldModelConfig } from '../webmcp/worldDirector';
 import { benchmarkStore } from '../store/benchmarkStore';
 import { BenchmarkLeaderboardModal } from './BenchmarkLeaderboardModal';
 import {
@@ -299,11 +295,17 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
 
   const handleNewSession = () => {
     autoPlayRef.current = false;
+    autoRoundCountRef.current = 0;
     setAutoPlayActive(false);
     responsesSession.resetSession();
     window.localStorage.removeItem(CHAT_STORAGE_KEY);
     setChatMessages([WELCOME_MESSAGE]);
   };
+
+  // Reset round counter whenever a new session / world replay starts
+  useEffect(() => {
+    autoRoundCountRef.current = session.turns.length;
+  }, [session.sessionId]);
 
   // Single AI Autonomous Step or Continuous Auto-Play Loop!
   const consecutiveAutoErrRef = useRef(0);
@@ -346,27 +348,20 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
     activeCallAbortRef.current = ac;
 
     try {
-      // Auto-replenish orders if pool + active is running dry before shift ends!
-      const preSnap = nexusStore.getState();
-      const remainingPlayable = preSnap.orders.filter(
-        (o) => o.stage !== 'delivered' && o.stage !== 'dropped',
-      ).length;
-      if (remainingPlayable === 0 && !preSnap.shift.shiftEnded) {
-        try {
-          setLiveProgressText('大厅订单已清空，世界导演正在派发新波次悬赏单...');
-          const waveRes = await spawnDynamicOrdersWave(3, ac.signal);
-          setChatMessages((prev) => [
-            ...prev,
-            {
-              id: `world-wave-${Date.now()}`,
-              role: 'assistant',
-              content: `**【世界导演动态派单】** 大厅补货 **3 单**新悬赏（${waveRes.spawnedIds.join('、')}），继续冲分！`,
-            },
-          ]);
-        } catch {
-          // Ignore World Director wave error so Rider loop continues
-        }
+      // Seed-locked synchronous anti-starvation check if all orders were cleared before next clock milestone
+      const replenishedIds = nexusStore.ensurePlayableOrdersFromSeed();
+      if (replenishedIds.length > 0) {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `world-wave-${Date.now()}`,
+            role: 'assistant',
+            content: `**【种子锁定加急补单】** 骑手已清空全部订单，按当前地图种子确定性补发 **${replenishedIds.length} 单**（${replenishedIds.join('、')}）！`,
+          },
+        ]);
       }
+
+      const beforeMilestones = nexusStore.getState().worldMap.triggeredClockMilestones?.length ?? 0;
 
       const turnRes = await runAutonomousArenaRound(llmConfig, ac.signal, (txt) =>
         setLiveProgressText(txt),
@@ -382,22 +377,19 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         },
       ]);
 
-      // Every 3 autonomous rounds, World Director injects a dynamic world event (isolated try/catch)!
-      if (roundNo % 3 === 0 && !nexusStore.getState().shift.shiftEnded) {
-        try {
-          setLiveProgressText('世界导演正在演化城市动态事件...');
-          const evText = await triggerSuddenWorldEvent(ac.signal);
-          setChatMessages((prev) => [
-            ...prev,
-            {
-              id: `world-ev-${Date.now()}`,
-              role: 'assistant',
-              content: `**【世界导演动态事件】** ${evText}`,
-            },
-          ]);
-        } catch {
-          // Never let optional World Director event failure stop Rider AI gameplay
-        }
+      // Surface any deterministic clock-milestone events triggered during this turn!
+      const postSnap = nexusStore.getState();
+      const afterMilestones = postSnap.worldMap.triggeredClockMilestones?.length ?? 0;
+      if (afterMilestones > beforeMilestones && postSnap.worldEvents[0]) {
+        const latestEv = postSnap.worldEvents[0];
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `world-ev-${Date.now()}`,
+            role: 'assistant',
+            content: `**【世界种子定时事件 · ${latestEv.gameTimeLabel}】** ${latestEv.title}\n> ${latestEv.detail}`,
+          },
+        ]);
       }
       return true;
     } catch (err) {

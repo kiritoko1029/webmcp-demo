@@ -55,8 +55,25 @@ export const DeclarativeFormsModule: React.FC<Props> = ({ hidden = false }) => {
       const note = String(fd.get('note') || '').trim() || ISSUE_LABELS[issueType];
       const agentInvoked = Boolean(event.agentInvoked);
 
+      const curState = nexusStore.getState();
+      const targetOrder = curState.orders.find(
+        (o) => o.orderId.toUpperCase() === orderId.toUpperCase(),
+      );
+      if (targetOrder?.slaExtendedOnce || curState.issueReports.some((r) => r.orderId === orderId)) {
+        const dupPayload = {
+          reported: false,
+          agentInvoked,
+          orderId,
+          message: `订单 ${orderId} 本局已申请过一次免责加时保护，不可重复叠加报备。`,
+        };
+        if (agentInvoked && typeof event.respondWith === 'function') {
+          event.respondWith(Promise.resolve(dupPayload));
+        }
+        return;
+      }
+
       const report: DeliveryIssueReport = {
-        id: `REP-${Math.floor(810 + Math.random() * 180)}`,
+        id: `REP-${801 + curState.issueReports.length}`,
         createdAt: new Date().toTimeString().slice(0, 8),
         orderId,
         issueType,
@@ -68,7 +85,9 @@ export const DeclarativeFormsModule: React.FC<Props> = ({ hidden = false }) => {
       nexusStore.update((prev) => ({
         ...prev,
         orders: prev.orders.map((o) =>
-          o.orderId === orderId ? { ...o, minutesLeft: o.minutesLeft + addedMinutes } : o,
+          o.orderId.toUpperCase() === orderId.toUpperCase()
+            ? { ...o, minutesLeft: o.minutesLeft + addedMinutes, slaExtendedOnce: true }
+            : o,
         ),
         issueReports: [report, ...prev.issueReports],
         declarativeFormStatus: {
@@ -129,7 +148,7 @@ export const DeclarativeFormsModule: React.FC<Props> = ({ hidden = false }) => {
         return;
       }
 
-      const receiptId = `WD-${Math.floor(10000 + Math.random() * 89999)}`;
+      const receiptId = `WD-${10001 + nexusStore.getState().withdrawals.length}`;
       const record: WithdrawalRecord = {
         receiptId,
         createdAt: new Date().toTimeString().slice(0, 8),

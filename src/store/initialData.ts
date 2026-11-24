@@ -15,7 +15,10 @@ export function createInitialWorldMap(): WorldMapConfig {
     themeDescription:
       '写字楼外卖柜与老旧无电梯公寓交错的高密度商圈，建国路辅路正在市政施工颠簸，带汤水或奶油蛋糕狂飙极易洒漏！',
     generatedByModel: '内置默认沙盘 (Seed: RG-CBD-DEFAULT)',
+    difficulty: 'standard',
     initialWeather: 'sunny',
+    initialRiderPos: { x: 295, y: 210 },
+    initialRiderArea: '国贸SOHO西广场',
     initialQuest: {
       title: '午高峰冲单挑战：准时完好送达 4 单额外奖 ¥25',
       targetDeliveries: 4,
