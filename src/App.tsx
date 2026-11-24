@@ -131,46 +131,48 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 md:h-dvh md:overflow-hidden">
+      {/* Floating Non-Layout-Shifting Toast Overlay */}
+      {seedBannerToast && (
+        <div className="pointer-events-none fixed left-1/2 top-3 z-50 -translate-x-1/2 rounded-full border border-emerald-400/50 bg-slate-950/95 px-4 py-1.5 text-xs font-medium text-emerald-200 shadow-2xl shadow-emerald-950/60 backdrop-blur-md">
+          🌱 {seedBannerToast}
+        </div>
+      )}
+
       {/* Top Arena Game HUD Header */}
       <header className="shrink-0 border-b border-slate-800/90 bg-slate-950/95 backdrop-blur">
-        {seedBannerToast && (
-          <div className="border-b border-emerald-500/30 bg-emerald-950/60 px-4 py-1.5 text-center text-xs font-medium text-emerald-200">
-            🌱 {seedBannerToast}
-          </div>
-        )}
-        <div className="mx-auto flex max-w-[1680px] flex-wrap items-center justify-between gap-3 px-4 py-2.5 lg:px-6">
+        <div className="mx-auto flex max-w-[1680px] flex-wrap items-center justify-between gap-2.5 px-4 py-2.5 lg:px-6">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/20">
-              <Bike className="h-6 w-6" />
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-slate-950 shadow-lg shadow-amber-500/20">
+              <Bike className="h-5 w-5" />
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-white">
-                  闪电骑士：AI 外卖生存挑战赛 (WebMCP LLM Arena)
+                <h1 className="text-sm font-bold tracking-tight text-white xl:text-base">
+                  闪电骑士：AI 外卖生存挑战赛 (WebMCP Arena)
                 </h1>
-                <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 font-mono text-[11px] font-semibold text-amber-300">
-                  {tools.length} WebMCP Tools
+                <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-amber-300">
+                  {tools.length} Tools
                 </span>
                 <span className="rounded-full border border-indigo-500/40 bg-indigo-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-300">
                   Seed: {worldMap.seedId}
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
-                双大模型架构：<strong className="text-indigo-300">世界导演模型</strong> 生成可共享种子地图/商家/悬赏单 ·{' '}
-                <strong className="text-amber-300">外卖员玩家模型</strong> 通过 WebMCP 决策闯关
+              <p className="text-[11px] text-slate-400">
+                双模型对抗：<strong className="text-indigo-300">世界导演</strong> 生成可共享种子城市 ·{' '}
+                <strong className="text-amber-300">外卖员模型</strong> 经 WebMCP 自主闯关
               </p>
             </div>
           </div>
 
-          {/* Top Controls */}
-          <div className="flex flex-wrap items-center gap-2 text-xs">
+          {/* Top Controls — Fixed-Width Toggle Labels for Zero Layout Jitter */}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <button
               type="button"
               onClick={() => setOpenDualModalTick((n) => n + 1)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/25 px-3 py-1.5 font-semibold text-indigo-200 hover:bg-indigo-600/40"
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-indigo-500/50 bg-indigo-600/25 px-2.5 py-1.5 font-semibold text-indigo-200 hover:bg-indigo-600/40"
             >
-              <Globe2 className="h-3.5 w-3.5 text-indigo-300" />
-              世界导演 &amp; 种子/模型
+              <Globe2 className="h-3.5 w-3.5 shrink-0 text-indigo-300" />
+              双模型 &amp; 种子
             </button>
 
             <button
@@ -181,23 +183,23 @@ export const App: React.FC = () => {
                 })
               }
               title="硬核盲测模式：隐藏所有 Debug 作弊工具与自动排线工具，移除提示词攻略与状态透视，考验大模型真实观测与规划能力"
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 font-bold transition ${
+              className={`inline-flex w-[104px] items-center justify-center gap-1 whitespace-nowrap rounded-lg border py-1.5 font-bold transition ${
                 blindMode
                   ? 'border-rose-500/60 bg-rose-500/20 text-rose-200 shadow-sm shadow-rose-500/20'
                   : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-rose-500/40 hover:text-rose-200'
               }`}
             >
-              <Target className="h-3.5 w-3.5 text-rose-400" />
-              {blindMode ? '硬核盲测: 开启' : '硬核盲测: 关'}
+              <Target className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+              {blindMode ? '硬核盲测:开' : '硬核盲测:关'}
             </button>
 
             <button
               type="button"
               onClick={() => setOpenLeaderboardTick((n) => n + 1)}
               title="查看大模型六维能力雷达图与同种子评测排行榜"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-500/15 px-2.5 py-1.5 font-bold text-amber-200 hover:bg-amber-500/25"
+              className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-amber-500/50 bg-amber-500/15 px-2.5 py-1.5 font-bold text-amber-200 hover:bg-amber-500/25"
             >
-              <Award className="h-3.5 w-3.5 text-amber-400" />
+              <Award className="h-3.5 w-3.5 shrink-0 text-amber-400" />
               评测榜单
             </button>
 
@@ -205,16 +207,16 @@ export const App: React.FC = () => {
               type="button"
               onClick={() => void handleCopyShareWorldUrl()}
               title="将当前世界导演生成的地图、危险区、商家与初始悬赏订单编码为可分享链接"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-2.5 py-1.5 font-semibold text-emerald-200 hover:bg-emerald-500/25"
+              className="inline-flex w-[108px] items-center justify-center gap-1 whitespace-nowrap rounded-lg border border-emerald-500/50 bg-emerald-500/15 py-1.5 font-semibold text-emerald-200 hover:bg-emerald-500/25"
             >
               {shareCopied ? (
                 <>
-                  <Check className="h-3.5 w-3.5 text-emerald-300" />
-                  已复制种子链接
+                  <Check className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+                  已复制链接
                 </>
               ) : (
                 <>
-                  <Share2 className="h-3.5 w-3.5 text-emerald-300" />
+                  <Share2 className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
                   分享世界种子
                 </>
               )}
@@ -227,36 +229,36 @@ export const App: React.FC = () => {
                   toolScopeMode: toolScopeMode === 'global' ? 'view-scoped' : 'global',
                 })
               }
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 font-medium ${
+              className={`inline-flex w-[88px] items-center justify-center gap-1 whitespace-nowrap rounded-lg border py-1.5 font-medium ${
                 toolScopeMode === 'view-scoped'
                   ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
                   : 'border-slate-700 bg-slate-900 text-slate-300'
               }`}
             >
-              <Layers className="h-3.5 w-3.5 text-amber-400" />
+              <Layers className="h-3.5 w-3.5 shrink-0 text-amber-400" />
               {toolScopeMode === 'global' ? '全量工具' : '按页动态'}
             </button>
 
             <button
               type="button"
               onClick={() => nexusStore.patch({ autoApproveConsequential: !autoApprove })}
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 font-medium ${
+              className={`inline-flex w-[104px] items-center justify-center gap-1 whitespace-nowrap rounded-lg border py-1.5 font-medium ${
                 !autoApprove
                   ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
                   : 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
               }`}
             >
-              <ShieldCheck className="h-3.5 w-3.5" />
-              {!autoApprove ? '弃单门禁开启' : '免确认模式'}
+              <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+              {!autoApprove ? '弃单门禁:开' : '弃单门禁:关'}
             </button>
 
             <button
               type="button"
               onClick={() => nexusStore.replayCurrentWorldSeed()}
               title="保持当前世界种子与初始订单不变，重置时间到 11:00 供不同外卖员模型公平打榜"
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-medium text-indigo-300 hover:border-indigo-500/50 hover:text-indigo-200"
+              className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-medium text-indigo-300 hover:border-indigo-500/50 hover:text-indigo-200"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
+              <RefreshCw className="h-3.5 w-3.5 shrink-0" />
               同种子重开
             </button>
 
