@@ -877,7 +877,9 @@ export const WorldDirectorModal: React.FC<Props> = ({
                 </label>
 
                 <label className="space-y-1">
-                  <span className="text-[11px] text-slate-400">完整回合保留窗口</span>
+                  <span className="text-[11px] text-slate-400">
+                    批量折叠窗口 (高水位触发批量折叠 · 保护 KV 前缀缓存)
+                  </span>
                   <select
                     value={session.maxWindowTurns}
                     onChange={(e) =>
@@ -887,10 +889,10 @@ export const WorldDirectorModal: React.FC<Props> = ({
                     }
                     className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-mono text-slate-200"
                   >
-                    <option value={4}>保留最近 4 轮</option>
-                    <option value={6}>保留最近 6 轮</option>
-                    <option value={8}>保留最近 8 轮 (推荐)</option>
-                    <option value={12}>保留最近 12 轮</option>
+                    <option value={12}>满 12 轮批量折叠</option>
+                    <option value={20}>满 20 轮批量折叠 (默认推荐 · 整局高缓存命中)</option>
+                    <option value={28}>满 28 轮批量折叠</option>
+                    <option value={40}>满 40 轮批量折叠 (超长测局)</option>
                   </select>
                 </label>
               </div>

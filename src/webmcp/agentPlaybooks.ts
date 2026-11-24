@@ -1,6 +1,7 @@
 import { computeUsedBoxSlots, nexusStore } from '../store/nexusStore';
 import {
-  buildLiveRiderSystemInstructions,
+  buildStaticRiderSystemInstructions,
+  buildTurnUserPromptWithTailSnapshot,
   ensureValidArgumentsJson,
   filterAndSanitizeOutputItemsForReplay,
   type ResponseUsageMetrics,
@@ -246,7 +247,13 @@ interface ResponsesApiPayload {
   error?: { message?: string; code?: string };
   usage?: {
     input_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number };
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    prompt_cache_hit_tokens?: number;
+    input_tokens_details?: {
+      cached_tokens?: number;
+      cache_creation_tokens?: number;
+    };
     output_tokens?: number;
     output_tokens_details?: { reasoning_tokens?: number };
     total_tokens?: number;
@@ -279,7 +286,9 @@ function normalizeToolSchemaForResponses(raw: Record<string, unknown> | null): R
 
   const rawProps = (raw.properties as Record<string, Record<string, unknown>> | undefined) ?? {};
   const properties: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(rawProps)) {
+  // Sort property keys alphabetically for 100% deterministic JSON serialization & KV cache stability!
+  for (const k of Object.keys(rawProps).sort()) {
+    const v = rawProps[k];
     if (v && typeof v === 'object') {
       properties[k] = sanitizeProp(v);
     }
@@ -290,7 +299,7 @@ function normalizeToolSchemaForResponses(raw: Record<string, unknown> | null): R
     properties,
   };
   if (Array.isArray(raw.required) && raw.required.length > 0) {
-    out.required = raw.required;
+    out.required = [...raw.required].map(String).sort();
   }
   return out;
 }
@@ -342,14 +351,33 @@ function parseResponsesPayload(data: ResponsesApiPayload) {
     textSegments.push(data.output_text.trim());
   }
 
+  const cachedInputTokens =
+    data.usage?.input_tokens_details?.cached_tokens ??
+    data.usage?.cache_read_input_tokens ??
+    data.usage?.prompt_cache_hit_tokens ??
+    0;
+  const cacheCreationTokens =
+    data.usage?.input_tokens_details?.cache_creation_tokens ??
+    data.usage?.cache_creation_input_tokens ??
+    0;
+  const rawInputTokens = data.usage?.input_tokens ?? 0;
+  // Normalize across OpenAI/DeepSeek (`input_tokens` includes cached) and Claude adapters (`input_tokens` may exclude cached/created)
+  const effectiveInputTokens =
+    rawInputTokens < cachedInputTokens + cacheCreationTokens
+      ? rawInputTokens + cachedInputTokens + cacheCreationTokens
+      : rawInputTokens;
+  const outputTokens = data.usage?.output_tokens ?? 0;
+
   const usage: ResponseUsageMetrics = {
-    inputTokens: data.usage?.input_tokens ?? 0,
-    cachedInputTokens: data.usage?.input_tokens_details?.cached_tokens ?? 0,
-    outputTokens: data.usage?.output_tokens ?? 0,
+    inputTokens: effectiveInputTokens,
+    cachedInputTokens,
+    cacheCreationTokens,
+    outputTokens,
     reasoningTokens: data.usage?.output_tokens_details?.reasoning_tokens ?? 0,
     totalTokens:
-      data.usage?.total_tokens ??
-      (data.usage?.input_tokens ?? 0) + (data.usage?.output_tokens ?? 0),
+      data.usage?.total_tokens && data.usage.total_tokens >= effectiveInputTokens + outputTokens
+        ? data.usage.total_tokens
+        : effectiveInputTokens + outputTokens,
   };
 
   return {
@@ -361,6 +389,8 @@ function parseResponsesPayload(data: ResponsesApiPayload) {
     usage,
   };
 }
+
+const unsupportedReasoningModels = new Set<string>();
 
 async function sendSingleResponsesFetch(
   endpoint: string,
@@ -399,7 +429,8 @@ export async function postResponsesRequest(
   reasoningEffort?: string,
 ): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
   const cleanEffort = normalizeReasoningEffort(reasoningEffort);
-  if (!cleanEffort) {
+  const modelKey = `${endpoint}::${String(baseBody.model ?? '')}`;
+  if (!cleanEffort || unsupportedReasoningModels.has(modelKey)) {
     return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
   }
 
@@ -455,6 +486,7 @@ export async function postResponsesRequest(
     (rCustom.status === 400 || rCustom.status === 422) &&
     /unknown parameter.*reasoning|unrecognized.*reasoning/i.test(rCustom.errText)
   ) {
+    unsupportedReasoningModels.add(modelKey);
     return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
   }
 
@@ -651,12 +683,11 @@ export async function runAutonomousArenaRound(
   onProgress: (statusText: string) => void,
 ): Promise<Omit<AgentChatMessage, 'id'>> {
   if (llmConfig.enabled && llmConfig.apiKey.trim()) {
-    return await runNaturalLanguageWebMCPTurn(
-      '【AI自动闯关回合】请分析当前战局快照，自主执行本回合最优的 1~3 步 WebMCP 工具行动（注意电量/体力/箱容格数、易损蛋糕热汤稳骑或升级减震架、写字楼存外卖柜、卡餐催单），冲刺最高段位分！',
-      llmConfig,
-      signal,
-      onProgress,
-    );
+    const blindMode = nexusStore.getState().benchmarkBlindMode;
+    const autoPrompt = blindMode
+      ? '【硬核盲测自动回合】请主动调用 WebMCP 工具获取状态并自主推进本回合最优的 1~4 步工具行动。'
+      : '【AI自动闯关回合】请结合本回合战局快照，自主执行本回合最优的 1~4 步 WebMCP 工具连招（兼顾箱容格数、易损单防洒路线或稳骑、电量续航与外卖柜存餐），冲刺最高段位分！';
+    return await runNaturalLanguageWebMCPTurn(autoPrompt, llmConfig, signal, onProgress);
   }
 
   // Built-in smart tactical bot using real WebMCP `executeWebMCPByName`
@@ -780,6 +811,21 @@ export async function runAutonomousArenaRound(
   };
 }
 
+function buildTurnTokenBadge(effortTag: string, turnUsage: ResponseUsageMetrics): string | undefined {
+  if (turnUsage.totalTokens <= 0) return undefined;
+  const cacheHitPart =
+    turnUsage.cachedInputTokens > 0 && turnUsage.inputTokens > 0
+      ? ` (命中缓存 ${turnUsage.cachedInputTokens} · ${Math.round(
+          (turnUsage.cachedInputTokens / turnUsage.inputTokens) * 100,
+        )}%)`
+      : (turnUsage.cacheCreationTokens ?? 0) > 0
+        ? ` (首轮建缓存 ${turnUsage.cacheCreationTokens})`
+        : '';
+  const reasoningPart =
+    turnUsage.reasoningTokens > 0 ? `(推理${turnUsage.reasoningTokens})` : '';
+  return `思考:${effortTag} · in:${turnUsage.inputTokens}${cacheHitPart} · out:${turnUsage.outputTokens}${reasoningPart}`;
+}
+
 export async function runNaturalLanguageWebMCPTurn(
   prompt: string,
   llmConfig: Pick<
@@ -798,12 +844,33 @@ export async function runNaturalLanguageWebMCPTurn(
     const effortTag = formatReasoningEffortTag(effort);
     responsesSession.syncEndpointBinding(endpoint);
 
+    // 1. Freeze `instructions` & sorted `tools` ONCE outside the sub-round loop so `[instructions + tools]`
+    //    is 100% byte-identical across every sub-round (`round 0..7`) and across every turn!
+    const blindMode = nexusStore.getState().benchmarkBlindMode;
+    const instructions = buildStaticRiderSystemInstructions(blindMode);
+
+    const discoveredSorted = [...(await discoverWebMCPTools())].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    const responsesTools = discoveredSorted.map((t) => ({
+      type: 'function',
+      name: t.name.replace(/\./g, '__'),
+      description: `[${t.originLabel}] ${t.description}`,
+      parameters: normalizeToolSchemaForResponses(t.inputSchema),
+    }));
+    const nameMap = new Map(
+      discoveredSorted.map((t) => [t.name.replace(/\./g, '__'), t.name]),
+    );
+
+    // 2. Append live shift snapshot ONCE at the tail of this turn's user message (stored immutably)
+    const apiUserPrompt = buildTurnUserPromptWithTailSnapshot(prompt);
+
     const sessSnap = responsesSession.getState();
     let useStatefulChain = sessSnap.contextMode === 'stateful_chain';
     let chainResponseId: string | null = useStatefulChain ? sessSnap.lastResponseId : null;
 
     const statelessInputChain: Array<Record<string, unknown>> =
-      responsesSession.buildWindowInputItems(prompt);
+      responsesSession.buildWindowInputItems(apiUserPrompt);
 
     const turnAssistantTexts: string[] = [];
     const turnReasoningParts: string[] = [];
@@ -812,6 +879,7 @@ export async function runNaturalLanguageWebMCPTurn(
     const turnUsage: ResponseUsageMetrics = {
       inputTokens: 0,
       cachedInputTokens: 0,
+      cacheCreationTokens: 0,
       outputTokens: 0,
       reasoningTokens: 0,
       totalTokens: 0,
@@ -826,22 +894,6 @@ export async function runNaturalLanguageWebMCPTurn(
           : `外卖员模型 (思考:${effortTag}) 正在推进第 ${round + 1} 步连招...`,
       );
 
-      const currentDiscovered = await discoverWebMCPTools();
-      const responsesTools = currentDiscovered.map((t) => ({
-        type: 'function',
-        name: t.name.replace(/\./g, '__'),
-        description: `[${t.originLabel}] ${t.description}`,
-        parameters: normalizeToolSchemaForResponses(t.inputSchema),
-      }));
-      const nameMap = new Map(
-        currentDiscovered.map((t) => [t.name.replace(/\./g, '__'), t.name]),
-      );
-
-      const instructions = [
-        buildLiveRiderSystemInstructions(responsesSession.getState().rollingSummary),
-        '回复排版要求：不要贴原始 JSON 或内部函数名（工具日志已收纳在消息下方的弹窗按钮中）；请直接用干练生动的中文总结本回合战术成果，包含关键订单号(如 ORD-204)、商家名(**加粗**)、收支金额(如 +¥29.0)、取餐号(如 #K09)或段位分。',
-      ].join('\n');
-
       // On final sub-round (round === 7), force `tool_choice: "none"` so thinking models
       // synthesize a genuine final message with `reasoning_text`!
       const effectiveToolChoice = round === 7 ? 'none' : 'auto';
@@ -854,7 +906,7 @@ export async function runNaturalLanguageWebMCPTurn(
           previous_response_id: chainResponseId,
           input:
             round === 0
-              ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }]
+              ? [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: apiUserPrompt }] }]
               : pendingToolOutputItems,
           tools: responsesTools,
           tool_choice: effectiveToolChoice,
@@ -912,7 +964,7 @@ export async function runNaturalLanguageWebMCPTurn(
 
       // Automatic fallback 2: If switching between non-thinking & thinking models mid-session triggers
       // a historical `reasoning_text` or `call_id` validation mismatch on round 0, fold older history
-      // into `rollingSummary` and retry cleanly from the live game snapshot!
+      // into `rollingSummary` and rebuild `statelessInputChain` cleanly while keeping `instructions` static!
       if (
         !apiRes.ok &&
         round === 0 &&
@@ -922,20 +974,14 @@ export async function runNaturalLanguageWebMCPTurn(
         )
       ) {
         responsesSession.compactNow(0);
-        statelessInputChain.splice(0, statelessInputChain.length, {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: prompt }],
-        });
+        const rebuiltChain = responsesSession.buildWindowInputItems(apiUserPrompt);
+        statelessInputChain.splice(0, statelessInputChain.length, ...rebuiltChain);
         apiRes = await postResponsesRequest(
           endpoint,
           llmConfig.apiKey,
           {
             model: llmConfig.model.trim() || 'gpt-4.1-mini',
-            instructions: [
-              buildLiveRiderSystemInstructions(responsesSession.getState().rollingSummary),
-              '回复排版要求：不要贴原始 JSON 或内部函数名；请用干练生动的中文总结本回合战术成果。',
-            ].join('\n'),
+            instructions,
             input: statelessInputChain,
             tools: responsesTools,
             tool_choice: effectiveToolChoice,
@@ -956,6 +1002,8 @@ export async function runNaturalLanguageWebMCPTurn(
 
       turnUsage.inputTokens += parsed.usage.inputTokens;
       turnUsage.cachedInputTokens += parsed.usage.cachedInputTokens;
+      turnUsage.cacheCreationTokens =
+        (turnUsage.cacheCreationTokens ?? 0) + (parsed.usage.cacheCreationTokens ?? 0);
       turnUsage.outputTokens += parsed.usage.outputTokens;
       turnUsage.reasoningTokens += parsed.usage.reasoningTokens;
       turnUsage.totalTokens += parsed.usage.totalTokens;
@@ -969,19 +1017,12 @@ export async function runNaturalLanguageWebMCPTurn(
         const finalReply =
           turnAssistantTexts.join('\n\n').trim() || buildRichLocalReply(turnToolLogs);
 
-        const tokenBadge =
-          turnUsage.totalTokens > 0
-            ? `思考:${effortTag} · in:${turnUsage.inputTokens}${
-                turnUsage.cachedInputTokens > 0 ? `(缓存${turnUsage.cachedInputTokens})` : ''
-              } · out:${turnUsage.outputTokens}${
-                turnUsage.reasoningTokens > 0 ? `(推理${turnUsage.reasoningTokens})` : ''
-              }`
-            : undefined;
+        const tokenBadge = buildTurnTokenBadge(effortTag, turnUsage);
 
         responsesSession.recordCompletedTurn({
           turnId: `turn_${Date.now()}`,
           createdAt: new Date().toTimeString().slice(0, 8),
-          userPrompt: prompt,
+          userPrompt: apiUserPrompt,
           assistantTexts: [finalReply],
           toolExchanges: turnToolExchanges,
           rawReplayItems: turnReplayItems,
@@ -1049,6 +1090,14 @@ export async function runNaturalLanguageWebMCPTurn(
           });
         }
 
+        // Cap oversized single output ONCE at creation time so it never mutates on later turns!
+        if (outputJsonStr.length > 3000) {
+          outputJsonStr = JSON.stringify({
+            _truncatedAtCreation: true,
+            preview: outputJsonStr.slice(0, 2700),
+          });
+        }
+
         const outputItem = {
           type: 'function_call_output',
           call_id: fc.callId,
@@ -1071,10 +1120,11 @@ export async function runNaturalLanguageWebMCPTurn(
 
     const fallbackReply =
       turnAssistantTexts.join('\n\n').trim() || buildRichLocalReply(turnToolLogs);
+    const fallbackBadge = buildTurnTokenBadge(effortTag, turnUsage);
     responsesSession.recordCompletedTurn({
       turnId: `turn_${Date.now()}`,
       createdAt: new Date().toTimeString().slice(0, 8),
-      userPrompt: prompt,
+      userPrompt: apiUserPrompt,
       assistantTexts: [fallbackReply],
       toolExchanges: turnToolExchanges,
       rawReplayItems: turnReplayItems,
@@ -1089,6 +1139,7 @@ export async function runNaturalLanguageWebMCPTurn(
       reasoningSummary: turnReasoningParts.join('\n').trim() || undefined,
       toolLogs: turnToolLogs,
       responseId: chainResponseId ?? undefined,
+      tokenBadge: fallbackBadge,
     };
   }
 

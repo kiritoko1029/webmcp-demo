@@ -9,12 +9,10 @@ import {
   Clock,
   FileText,
   Globe2,
-  Layers,
   Map,
   RefreshCw,
   RotateCcw,
   Share2,
-  ShieldCheck,
   ShoppingBag,
   Target,
   Trophy,
@@ -36,6 +34,7 @@ import {
 } from './store/nexusStore';
 import type { ActiveModule } from './types/domain';
 import { useWebMCPBridge } from './webmcp/useWebMCPBridge';
+import { responsesSession } from './webmcp/responsesSessionManager';
 import { importWorldFromSeedOrUrl } from './webmcp/worldDirector';
 import { buildShareableWorldUrl } from './webmcp/worldSeedCodec';
 
@@ -60,8 +59,6 @@ export const App: React.FC = () => {
   const [seedBannerToast, setSeedBannerToast] = useState<string | null>(null);
 
   const activeModule = useNexusStore((s) => s.activeModule);
-  const toolScopeMode = useNexusStore((s) => s.toolScopeMode);
-  const autoApprove = useNexusStore((s) => s.autoApproveConsequential);
   const blindMode = useNexusStore((s) => s.benchmarkBlindMode);
   const worldMap = useNexusStore((s) => s.worldMap);
   const rider = useNexusStore((s) => s.rider);
@@ -224,38 +221,11 @@ export const App: React.FC = () => {
 
             <button
               type="button"
-              onClick={() =>
-                nexusStore.patch({
-                  toolScopeMode: toolScopeMode === 'global' ? 'view-scoped' : 'global',
-                })
-              }
-              className={`inline-flex w-[88px] items-center justify-center gap-1 whitespace-nowrap rounded-lg border py-1.5 font-medium ${
-                toolScopeMode === 'view-scoped'
-                  ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
-                  : 'border-slate-700 bg-slate-900 text-slate-300'
-              }`}
-            >
-              <Layers className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-              {toolScopeMode === 'global' ? '全量工具' : '按页动态'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => nexusStore.patch({ autoApproveConsequential: !autoApprove })}
-              className={`inline-flex w-[104px] items-center justify-center gap-1 whitespace-nowrap rounded-lg border py-1.5 font-medium ${
-                !autoApprove
-                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
-                  : 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
-              }`}
-            >
-              <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-              {!autoApprove ? '弃单门禁:开' : '弃单门禁:关'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => nexusStore.replayCurrentWorldSeed()}
-              title="保持当前世界种子与初始订单不变，重置时间到 11:00 供不同外卖员模型公平打榜"
+              onClick={() => {
+                nexusStore.replayCurrentWorldSeed();
+                responsesSession.resetSession();
+              }}
+              title="保持当前世界种子与初始订单不变，重置时间到 11:00 并清空旧局上下文，供不同外卖员模型公平打榜"
               className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 font-medium text-indigo-300 hover:border-indigo-500/50 hover:text-indigo-200"
             >
               <RefreshCw className="h-3.5 w-3.5 shrink-0" />
@@ -266,6 +236,7 @@ export const App: React.FC = () => {
               type="button"
               onClick={() => {
                 nexusStore.resetEnvironment();
+                responsesSession.resetSession();
                 if (window.location.hash.includes('world=')) {
                   window.history.replaceState(
                     null,

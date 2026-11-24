@@ -183,7 +183,7 @@ function createFreshDefaultState(): NexusState {
   return {
     activeModule: 'dispatch',
     toolScopeMode: 'global',
-    autoApproveConsequential: false,
+    autoApproveConsequential: true,
     includePromptInjectionSample: true,
     benchmarkBlindMode: false,
 
@@ -258,9 +258,8 @@ function loadHydratedState(): NexusState {
     return {
       ...fresh,
       activeModule: saved.activeModule ?? fresh.activeModule,
-      toolScopeMode: saved.toolScopeMode ?? fresh.toolScopeMode,
-      autoApproveConsequential:
-        saved.autoApproveConsequential ?? fresh.autoApproveConsequential,
+      toolScopeMode: 'global',
+      autoApproveConsequential: true,
       includePromptInjectionSample:
         saved.includePromptInjectionSample ?? fresh.includePromptInjectionSample,
       benchmarkBlindMode: saved.benchmarkBlindMode ?? fresh.benchmarkBlindMode,

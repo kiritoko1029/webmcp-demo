@@ -282,7 +282,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
   };
 
   const handleCompactContext = () => {
-    const { compressedCount, keptCount } = responsesSession.compactNow(2);
+    const { compressedCount, keptCount } = responsesSession.compactNow(4);
     stickToBottomRef.current = true;
     setChatMessages((prev) => [
       ...prev,
@@ -291,8 +291,8 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         role: 'assistant',
         content:
           compressedCount > 0
-            ? `已将早期 **${compressedCount} 轮**战报及工具输出压缩为轻量摘要，仅保留最近 **${keptCount} 轮**完整上下文。`
-            : `当前仅 **${keptCount} 轮**记录，已重置服务端链式游标。`,
+            ? `已将早期 **${compressedCount} 轮**战报批量折叠为历史摘要，保留最近 **${keptCount} 轮**完整上下文（后续回合保持纯追加前缀，保护 KV 缓存命中）。`
+            : `当前仅 **${keptCount} 轮**记录，无需折叠压缩。`,
       },
     ]);
   };
@@ -826,6 +826,28 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
                   <span className="font-mono text-[10px] text-slate-400">
                     ~{estimatedCtxTokens}tok
                   </span>
+                  {session.cumulativeUsage.inputTokens > 0 && (
+                    <span
+                      title={`累计输入: ${session.cumulativeUsage.inputTokens} tok | 缓存读取: ${session.cumulativeUsage.cachedInputTokens} tok${
+                        (session.cumulativeUsage.cacheCreationTokens ?? 0) > 0
+                          ? ` | 缓存新建: ${session.cumulativeUsage.cacheCreationTokens} tok`
+                          : ''
+                      }`}
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                        session.cumulativeUsage.cachedInputTokens > 0
+                          ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                          : 'border border-slate-700 bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      缓存{' '}
+                      {Math.round(
+                        (session.cumulativeUsage.cachedInputTokens /
+                          session.cumulativeUsage.inputTokens) *
+                          100,
+                      )}
+                      %
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1">

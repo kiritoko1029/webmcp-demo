@@ -15,6 +15,7 @@ import {
   normalizeReasoningEffort,
   postResponsesRequest,
 } from './agentPlaybooks';
+import { responsesSession } from './responsesSessionManager';
 import {
   createSeededRng,
   encodeWorldToShareSeed,
@@ -822,6 +823,7 @@ export async function generateNewWorldByDirector(
       ],
     }));
 
+    responsesSession.resetSession();
     const shareToken = syncUrlHash
       ? await syncBrowserHashWithWorld(mapWithSnapshot, generatedOrders)
       : await encodeWorldToShareSeed(mapWithSnapshot, generatedOrders);
@@ -915,6 +917,7 @@ export async function generateNewWorldByDirector(
     ],
   }));
 
+  responsesSession.resetSession();
   const shareToken = syncUrlHash
     ? await syncBrowserHashWithWorld(finalMap, orders)
     : await encodeWorldToShareSeed(finalMap, orders);
@@ -953,6 +956,7 @@ export async function importWorldFromSeedOrUrl(
     }
   }
 
+  responsesSession.resetSession();
   if (parsed.kind === 'snapshot') {
     const { map, orders } = parsed.pkg;
     const clonedOrders = orders.map((o) => ({
