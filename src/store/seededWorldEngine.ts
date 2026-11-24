@@ -3,6 +3,7 @@ import type {
   FragileTag,
   MapPoint,
   RiderProfile,
+  ScheduledMilestoneEventSpec,
   WorldDifficultyLevel,
   WorldMapConfig,
 } from '../types/domain';
@@ -174,50 +175,73 @@ export function synthesizeDeterministicOrdersForMap(params: {
 }
 
 /**
- * Computes a 100% deterministic scheduled city event (weather + pool subsidy) for `(seedId, milestoneMinute)`.
+ * Resolves the scheduled city event at `milestoneMinute`:
+ * 1. If the World Director LLM pre-baked a `scheduledEvents` script into `map` (saved inside the seed & `#world=RGW1_...`),
+ *    replays that exact World-LLM-authored mid-game event (`source: 'world_llm'`)!
+ * 2. Otherwise falls back to 100% deterministic PRNG locked to `(map.seedId, milestoneMinute)` (`source: 'game_engine'`).
  */
 export function computeSeededMilestoneEvent(params: {
+  map?: WorldMapConfig;
   seedId: string;
   milestoneMinute: number;
   milestoneLabel: string;
   currentWeather: 'sunny' | 'heavy_rain' | 'gale_wind';
-}): {
-  nextWeather: 'sunny' | 'heavy_rain' | 'gale_wind';
-  feeDeltaYuan: number;
-  title: string;
-  detail: string;
-} {
+}): ScheduledMilestoneEventSpec {
+  const prebaked = params.map?.scheduledEvents?.find(
+    (e) => e.minute === params.milestoneMinute,
+  );
+  if (prebaked) {
+    return {
+      minute: params.milestoneMinute,
+      title: prebaked.title.includes(params.milestoneLabel.slice(0, 5))
+        ? prebaked.title
+        : `[${params.milestoneLabel}] ${prebaked.title}`,
+      detail: prebaked.detail,
+      nextWeather: prebaked.nextWeather,
+      feeDeltaYuan: Number(prebaked.feeDeltaYuan.toFixed(1)),
+      source: 'world_llm',
+    };
+  }
+
   const rng = createSeededRng(`${params.seedId}::CLOCK_EVENT::${params.milestoneMinute}`);
   const roll = rng.nextInt(0, 3);
 
   if (roll === 0) {
     return {
+      minute: params.milestoneMinute,
       nextWeather: 'heavy_rain',
       feeDeltaYuan: 4.0,
       title: `[${params.milestoneLabel}] 气象台雷阵雨补贴开启`,
       detail: '突发阵雨预警！平台启动恶劣天气冲单补贴，大厅待抢与新派订单每单 +¥4.0（骑行耗电略增）',
+      source: 'game_engine',
     };
   }
   if (roll === 1) {
     return {
+      minute: params.milestoneMinute,
       nextWeather: 'gale_wind',
       feeDeltaYuan: 3.0,
       title: `[${params.milestoneLabel}] 商圈横风预警激励开启`,
       detail: '街头阵风加剧！大厅待抢与新派订单每单追加 +¥3.0 防风配送补贴',
+      source: 'game_engine',
     };
   }
   if (roll === 2) {
     return {
+      minute: params.milestoneMinute,
       nextWeather: 'sunny',
       feeDeltaYuan: 2.5,
       title: `[${params.milestoneLabel}] 写字楼爆单冲刺补贴`,
       detail: '天气晴好、商圈集中爆单！大厅待抢与新派订单每单追加 +¥2.5 高峰奖励',
+      source: 'game_engine',
     };
   }
   return {
+    minute: params.milestoneMinute,
     nextWeather: params.currentWeather,
     feeDeltaYuan: 2.0,
     title: `[${params.milestoneLabel}] 热门餐饮加价悬赏潮`,
     detail: '周边网红茶饮甜品订单激增，大厅待抢与新派订单每单追加 +¥2.0 悬赏金',
+    source: 'game_engine',
   };
 }

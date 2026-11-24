@@ -4,12 +4,14 @@ import { buildDefaultStops, nexusStore } from '../store/nexusStore';
 import {
   buildSeededInitialRider,
   computeSeededMilestoneEvent,
+  SCHEDULED_CLOCK_MILESTONES,
   synthesizeDeterministicOrdersForMap,
 } from '../store/seededWorldEngine';
 import type {
   DeliveryOrder,
   FoodCategory,
   FragileTag,
+  ScheduledMilestoneEventSpec,
   WorldHazardZone,
   WorldLandmark,
   WorldMapConfig,
@@ -580,18 +582,26 @@ export async function generateNewWorldByDirector(
         hasElevator: boolean;
         hasSmartLocker: boolean;
       }>;
+      scheduledEvents?: Array<{
+        minute: number;
+        title: string;
+        detail: string;
+        nextWeather: 'sunny' | 'heavy_rain' | 'gale_wind';
+        feeDeltaYuan: number;
+      }>;
     }
 
     const spec = await callWorldResponsesJson<LlmWorldSpec>(
       `你是《闪电骑士：AI外卖生存挑战赛》的世界导演大模型 (World Director)。
-请根据用户给定的城市/天气主题与世界种子 [${seedId}]，设计一张高策略博弈性的 920x390 像素城市外卖地图 JSON：
+请根据用户给定的城市/天气主题与世界种子 [${seedId}]，设计一张高策略博弈性的 920x390 像素城市外卖地图及“局中四幕定时突发事件剧本” JSON：
 要求包含：
 - themeName (中文主题名), themeDescription (一句话玩法特色), questTitle (本局冲单支线目标), questRewardYuan (20-45), weather ("sunny"|"heavy_rain"|"gale_wind")
 - roadsH: 3条横向道路 [{"y": 115, "name": "..."}, {"y": 210, "name": "..."}, {"y": 315, "name": "..."}]
 - roadsV: 3条纵向道路 [{"x": 240, "name": "..."}, {"x": 520, "name": "..."}, {"x": 760, "name": "..."}]
 - hazards: 2个危险地形区 (type 只能是 "construction_bumpy" | "flooded_slow" | "uphill_slope", x 在 250..780, y 在 100..330, effectNote 简述影响)
 - merchants: 5家特色餐饮商户 (category 只能是 "奶茶咖啡"|"快餐便当"|"火锅烧烤"|"蛋糕甜品"|"生鲜超市", x 在 160..820, y 在 90..340, busyLevel 为 "normal"|"busy"|"jammed", signatureItems 2个菜品名, npcPersona 一句话人设)
-- landmarks: 4个收货楼宇 (x 在 180..850, y 在 85..340, floor 3..32, 至少1个 hasElevator:false 无电梯老楼, 至少2个 hasSmartLocker:true 写字楼/公寓)`,
+- landmarks: 4个收货楼宇 (x 在 180..850, y 在 85..340, floor 3..32, 至少1个 hasElevator:false 无电梯老楼, 至少2个 hasSmartLocker:true 写字楼/公寓)
+- scheduledEvents: 4个贴合本城市主题的局中动态突发事件（分别对应游戏第 35、75、115、150 分钟，即 11:35 / 12:15 / 12:55 / 13:30，开局对外卖员隐藏，到点触发并锁定进种子确保不同模型公平对比！格式：[{"minute":35,"title":"...","detail":"...","nextWeather":"heavy_rain"|"gale_wind"|"sunny","feeDeltaYuan":3.5}, ...]）`,
       `请生成外卖生存游戏世界，主题：「${promptText}」，种子：${seedId}，难度：${cfg.difficulty}`,
       options?.signal,
     );
@@ -601,6 +611,32 @@ export async function generateNewWorldByDirector(
     const questReward = clampCoord(spec.questRewardYuan ?? 28, 15, 60);
     const questTitle = spec.questTitle || '城市冲单挑战：准时完好送达 4 单赢额外奖金';
     const initialWeather = spec.weather || 'sunny';
+
+    const validWeathers = ['sunny', 'heavy_rain', 'gale_wind'] as const;
+    const normalizedScheduledEvents: ScheduledMilestoneEventSpec[] = SCHEDULED_CLOCK_MILESTONES.map(
+      (ms, idx) => {
+        const rawEv =
+          spec.scheduledEvents?.find((e) => Number(e.minute) === ms.minute) ??
+          spec.scheduledEvents?.[idx];
+        if (rawEv && rawEv.title) {
+          const w = validWeathers.includes(rawEv.nextWeather) ? rawEv.nextWeather : initialWeather;
+          return {
+            minute: ms.minute,
+            title: rawEv.title,
+            detail: rawEv.detail || '城市突发动态事件生效，待抢与新派订单享受额外配送补贴！',
+            nextWeather: w,
+            feeDeltaYuan: Number(clampCoord(rawEv.feeDeltaYuan ?? 3, 1.5, 6).toFixed(1)),
+            source: 'world_llm',
+          };
+        }
+        return computeSeededMilestoneEvent({
+          seedId,
+          milestoneMinute: ms.minute,
+          milestoneLabel: ms.label,
+          currentWeather: initialWeather,
+        });
+      },
+    );
 
     const builtMap: WorldMapConfig = {
       seedId,
@@ -616,6 +652,7 @@ export async function generateNewWorldByDirector(
         targetDeliveries: 4,
         rewardYuan: questReward,
       },
+      scheduledEvents: normalizedScheduledEvents,
       waveCount: 0,
       triggeredClockMilestones: [],
       roadsH:
@@ -1098,6 +1135,109 @@ export async function spawnDynamicOrdersWave(
   });
 
   return { spawnedIds: fallbackOrders.map((o) => o.orderId), usedLiveWorldModel: false };
+}
+
+/**
+ * 3b. Pre-bake 4 World-Director-LLM mid-game sudden events (`11:35 / 12:15 / 12:55 / 13:30`)
+ * directly into the CURRENT seed's `worldMap.scheduledEvents` + `#world=RGW1_...` URL snapshot,
+ * and reset shift to 11:00 so ALL Rider Models encounter the exact same AI-authored surprise events!
+ */
+export async function bakeDirectorEventsIntoCurrentSeed(
+  signal?: AbortSignal,
+): Promise<{ count: number; titles: string[]; usedLiveWorldModel: boolean }> {
+  const cfg = worldModelStore.getState();
+  const s = nexusStore.getState();
+  const curMap = s.worldMap;
+
+  if (cfg.enabled && cfg.apiKey.trim()) {
+    interface LlmTimelineSpec {
+      events: Array<{
+        minute: number;
+        title: string;
+        detail: string;
+        nextWeather: 'sunny' | 'heavy_rain' | 'gale_wind';
+        feeDeltaYuan: number;
+      }>;
+    }
+
+    const res = await callWorldResponsesJson<LlmTimelineSpec>(
+      `你是《闪电骑士：AI外卖生存挑战赛》的世界导演大模型。当前城市：「${curMap.themeName}」（种子：${curMap.seedId}，特色：${curMap.themeDescription}）。
+请为本局 180 分钟班次预编写 4 幕极具戏剧张力与城市特色的“局中突发随机事件剧本”，分别在游戏第 35、75、115、150 分钟（即 11:35 / 12:15 / 12:55 / 13:30）触发。
+这些事件在触发前对外卖员模型完全隐藏，并会被固化进地图种子以确保不同外卖员大模型公平打榜！
+返回 JSON 格式：
+{
+  "events": [
+    { "minute": 35, "title": "事件短标题", "detail": "具体路况/天气/爆单影响说明", "nextWeather": "heavy_rain" | "gale_wind" | "sunny", "feeDeltaYuan": 3.5 },
+    { "minute": 75, "title": "...", "detail": "...", "nextWeather": "...", "feeDeltaYuan": 3.0 },
+    { "minute": 115, "title": "...", "detail": "...", "nextWeather": "...", "feeDeltaYuan": 4.0 },
+    { "minute": 150, "title": "...", "detail": "...", "nextWeather": "...", "feeDeltaYuan": 2.5 }
+  ]
+}`,
+      `请为城市「${curMap.themeName}」生成并锁定 4 幕局中突发事件时间轴！`,
+      signal,
+    );
+
+    const validWeathers = ['sunny', 'heavy_rain', 'gale_wind'] as const;
+    const baked: ScheduledMilestoneEventSpec[] = SCHEDULED_CLOCK_MILESTONES.map((ms, idx) => {
+      const item =
+        res.events?.find((e) => Number(e.minute) === ms.minute) ?? res.events?.[idx];
+      const w =
+        item && validWeathers.includes(item.nextWeather)
+          ? item.nextWeather
+          : (curMap.initialWeather ?? 'sunny');
+      return {
+        minute: ms.minute,
+        title: item?.title || `${ms.label}突发事件`,
+        detail: item?.detail || '商圈动态事件生效，待抢与新派订单享受额外配送补贴！',
+        nextWeather: w,
+        feeDeltaYuan: Number(clampCoord(item?.feeDeltaYuan ?? 3, 1.5, 6).toFixed(1)),
+        source: 'world_llm',
+      };
+    });
+
+    const updatedMap: WorldMapConfig = {
+      ...curMap,
+      scheduledEvents: baked,
+      waveCount: 0,
+      triggeredClockMilestones: [],
+    };
+    nexusStore.patch({ worldMap: updatedMap });
+    nexusStore.replayCurrentWorldSeed();
+    responsesSession.resetSession();
+    await syncBrowserHashWithWorld(
+      nexusStore.getState().worldMap,
+      nexusStore.getState().orders,
+    );
+
+    return {
+      count: baked.length,
+      titles: baked.map((b) => b.title),
+      usedLiveWorldModel: true,
+    };
+  }
+
+  // Offline deterministic fallback
+  const fallbackBaked: ScheduledMilestoneEventSpec[] = SCHEDULED_CLOCK_MILESTONES.map((ms) =>
+    computeSeededMilestoneEvent({
+      seedId: curMap.seedId,
+      milestoneMinute: ms.minute,
+      milestoneLabel: ms.label,
+      currentWeather: curMap.initialWeather ?? 'sunny',
+    }),
+  );
+  nexusStore.patch({
+    worldMap: {
+      ...curMap,
+      scheduledEvents: fallbackBaked,
+    },
+  });
+  nexusStore.replayCurrentWorldSeed();
+  responsesSession.resetSession();
+  return {
+    count: fallbackBaked.length,
+    titles: fallbackBaked.map((b) => b.title),
+    usedLiveWorldModel: false,
+  };
 }
 
 /**

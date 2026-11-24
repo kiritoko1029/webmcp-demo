@@ -31,6 +31,7 @@ import {
   type ResponsesSessionState,
 } from '../webmcp/responsesSessionManager';
 import {
+  bakeDirectorEventsIntoCurrentSeed,
   generateNewWorldByDirector,
   importWorldFromSeedOrUrl,
   spawnDynamicOrdersWave,
@@ -187,6 +188,22 @@ export const WorldDirectorModal: React.FC<Props> = ({
     try {
       const msg = await triggerSuddenWorldEvent();
       setWorldFeedback({ ok: true, text: `突发事件已生效：${msg}` });
+    } catch (err) {
+      setWorldFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setWorldBusy(null);
+    }
+  };
+
+  const handleBakeTimeline = async () => {
+    if (worldBusy) return;
+    setWorldBusy('正在由世界导演大模型预编写并锁定本局 4 幕突发事件剧本 (11:35/12:15/12:55/13:30)...');
+    try {
+      const res = await bakeDirectorEventsIntoCurrentSeed();
+      setWorldFeedback({
+        ok: true,
+        text: `${res.usedLiveWorldModel ? '[世界导演大模型预烘焙完成]' : '[确定性种子剧本锁定]'} 已为当前种子 [${worldMap.seedId}] 锁定 ${res.count} 幕隐藏局中突发事件并重置回 11:00，不同外卖员模型将遭遇 100% 相同的导演事件！`,
+      });
     } catch (err) {
       setWorldFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -404,33 +421,26 @@ export const WorldDirectorModal: React.FC<Props> = ({
                   </button>
                 </div>
 
-                <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-800 pt-3">
+                <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
                   <button
                     type="button"
                     disabled={Boolean(worldBusy)}
-                    onClick={() => void handleSpawnWave()}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-800"
+                    onClick={() => void handleBakeTimeline()}
+                    title="由世界导演大模型一次性预编写 11:35 / 12:15 / 12:55 / 13:30 四幕隐藏突发事件并锁入当前种子，确保既有大模型创意事件、不同参赛模型又 100% 公平一致！"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/45 bg-amber-500/15 px-3 py-1.5 font-semibold text-amber-200 hover:bg-amber-500/25"
                   >
-                    <PlusCircle className="h-3.5 w-3.5 text-emerald-400" />
-                    世界导演动态加派 3 笔新单
-                  </button>
-                  <button
-                    type="button"
-                    disabled={Boolean(worldBusy)}
-                    onClick={() => void handleTriggerEvent()}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-800"
-                  >
-                    <Zap className="h-3.5 w-3.5 text-amber-400" />
-                    触发随机城市突发事件
+                    <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                    预烘焙锁定本种子 4 幕导演事件
                   </button>
                   <button
                     type="button"
                     disabled={Boolean(worldBusy)}
                     onClick={() => {
                       nexusStore.replayCurrentWorldSeed();
+                      responsesSession.resetSession();
                       setWorldFeedback({
                         ok: true,
-                        text: `已按当前种子 [${worldMap.seedId}] 重置回 11:00 起点，地图与初始订单保持 100% 一致！`,
+                        text: `已按当前种子 [${worldMap.seedId}] 重置回 11:00 起点，地图、初始订单及局中 4 幕动态事件保持 100% 一致！`,
                       });
                     }}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 font-medium text-indigo-200 hover:bg-indigo-500/20"
@@ -438,6 +448,37 @@ export const WorldDirectorModal: React.FC<Props> = ({
                     <RefreshCw className="h-3.5 w-3.5 text-indigo-300" />
                     同种子重开 (模型公平打榜)
                   </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(worldBusy)}
+                    onClick={() => void handleSpawnWave()}
+                    title="娱乐沙盒调试：手动临时加单（公平打榜对比时请勿中途手动点击）"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800"
+                  >
+                    <PlusCircle className="h-3.5 w-3.5 text-emerald-400" />
+                    沙盒手动加单
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(worldBusy)}
+                    onClick={() => void handleTriggerEvent()}
+                    title="娱乐沙盒调试：手动触发事件（公平打榜对比时请勿中途手动点击）"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800"
+                  >
+                    <Zap className="h-3.5 w-3.5 text-amber-400" />
+                    沙盒手动事件
+                  </button>
+                </div>
+
+                <div className="mt-2.5 flex items-center justify-between rounded-lg border border-slate-800/90 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-400">
+                  <span>
+                    局中动态事件状态（<code className="text-indigo-300">11:35 / 12:15 / 12:55 / 13:30</code> 对骑手隐藏，到点触发）：
+                  </span>
+                  <span className="font-mono font-semibold text-emerald-300">
+                    {worldMap.scheduledEvents?.some((e) => e.source === 'world_llm')
+                      ? '● 世界导演AI预烘焙剧本 (同种子100%一致)'
+                      : '● 种子PRNG确定性剧本 (同种子100%一致)'}
+                  </span>
                 </div>
 
                 {worldBusy && (

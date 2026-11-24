@@ -70,6 +70,15 @@ export interface WorldStation {
 
 export type WorldDifficultyLevel = 'standard' | 'hardcore' | 'chaos';
 
+export interface ScheduledMilestoneEventSpec {
+  minute: number; // 35, 75, 115, 150
+  title: string;
+  detail: string;
+  nextWeather: 'sunny' | 'heavy_rain' | 'gale_wind';
+  feeDeltaYuan: number;
+  source: 'world_llm' | 'game_engine';
+}
+
 export interface WorldMapConfig {
   seedId: string;
   themeName: string;
@@ -85,6 +94,7 @@ export interface WorldMapConfig {
     rewardYuan: number;
   };
   initialOrdersSnapshot?: DeliveryOrder[];
+  scheduledEvents?: ScheduledMilestoneEventSpec[];
   waveCount?: number;
   triggeredClockMilestones?: number[];
   roadsH: Array<{ y: number; name: string }>;

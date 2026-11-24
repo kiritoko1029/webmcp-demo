@@ -395,6 +395,7 @@ export const nexusStore = {
               nextWaveCount += 1;
 
               const ev = computeSeededMilestoneEvent({
+                map: state.worldMap,
                 seedId: state.worldMap.seedId,
                 milestoneMinute: ms.minute,
                 milestoneLabel: ms.label,
@@ -439,7 +440,7 @@ export const nexusStore = {
                 gameTimeLabel: msClockLabel,
                 title: `${ev.title} · 新刷 ${rawWave.length} 笔同种子悬赏单`,
                 detail: `${ev.detail}；新增订单：${rawWave.map((o) => `${o.orderId}(${o.merchantName})`).join('、')}`,
-                source: 'game_engine',
+                source: ev.source,
                 severity: ev.nextWeather === 'heavy_rain' ? 'warn' : 'bonus',
               });
 
@@ -447,10 +448,10 @@ export const nexusStore = {
                 id: `ACT-MS-${ms.minute}`,
                 gameTimeLabel: msClockLabel,
                 wallTime: new Date().toTimeString().slice(0, 8),
-                actor: '世界导演',
+                actor: ev.source === 'world_llm' ? '世界导演AI' : '世界引擎',
                 toolName: `seed.milestone_${ms.minute}m`,
                 category: 'observe',
-                headline: `${ms.label}：新增 ${rawWave.map((o) => o.orderId).join('、')}`,
+                headline: `${ms.label}：${ev.title} (+${rawWave.length}单)`,
                 badges: [`天气:${ev.nextWeather}`, `补贴+¥${ev.feeDeltaYuan}`, `+${rawWave.length}单`],
               });
             }
