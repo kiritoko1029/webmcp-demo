@@ -323,6 +323,8 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         modelName: modelLabel,
         seedId: endSnap.worldMap.seedId,
         themeName: endSnap.worldMap.themeName,
+        worldMap: endSnap.worldMap,
+        orders: endSnap.orders,
         blindMode: endSnap.benchmarkBlindMode,
         shift: endSnap.shift,
         rider: endSnap.rider,
@@ -333,7 +335,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         {
           id: `shift-end-${Date.now()}`,
           role: 'assistant',
-          content: `**180 分钟午高峰挑战班次圆满结束！成绩已自动计入【评测榜单】！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 点击顶部 **【评测榜单】** 可查看六维能力雷达图与同种子排名对比！`,
+          content: `**180 分钟午高峰挑战班次圆满结束！成绩已自动上传至【全网云端评测榜单】！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 点击顶部 **【评测榜单】** 即可与全网其它大模型战绩叠加六维雷达图对比！`,
         },
       ]);
       return false;

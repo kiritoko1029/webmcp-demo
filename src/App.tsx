@@ -25,6 +25,7 @@ import { LiveRiderRadarBar } from './components/LiveRiderRadarBar';
 import { RiderDispatchModule } from './components/RiderDispatchModule';
 import { SpecGuideModule } from './components/SpecGuideModule';
 import { WebMCPConsoleDock } from './components/WebMCPConsoleDock';
+import { useBenchmarkRecords } from './store/benchmarkStore';
 import {
   computeArenaRank,
   computeUsedBoxSlots,
@@ -64,6 +65,7 @@ export const App: React.FC = () => {
   const rider = useNexusStore((s) => s.rider);
   const shift = useNexusStore((s) => s.shift);
   const orders = useNexusStore((s) => s.orders);
+  const benchmarkRecords = useBenchmarkRecords();
   const formAwaitingHuman = useNexusStore((s) => s.declarativeFormStatus.awaitingHumanSubmit);
 
   // Auto-load shared world seed when opening a `#world=...` or `?world=...` URL!
@@ -193,11 +195,11 @@ export const App: React.FC = () => {
             <button
               type="button"
               onClick={() => setOpenLeaderboardTick((n) => n + 1)}
-              title="查看大模型六维能力雷达图与同种子评测排行榜"
+              title="查看全网云端实时排行榜、大模型六维能力雷达图与同种子挑战对比"
               className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-amber-500/50 bg-amber-500/15 px-2.5 py-1.5 font-bold text-amber-200 hover:bg-amber-500/25"
             >
               <Award className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-              评测榜单
+              云端榜单{benchmarkRecords.length > 0 ? ` (${benchmarkRecords.length})` : ''}
             </button>
 
             <button

@@ -1,11 +1,15 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Award,
   BookmarkPlus,
+  Cloud,
+  CloudUpload,
   Filter,
+  Loader2,
+  RefreshCw,
   ShieldCheck,
+  Swords,
   Target,
-  Trash2,
   Trophy,
   X,
 } from 'lucide-react';
@@ -15,9 +19,11 @@ import {
   computeSixDimensionScores,
   type SixDimensionScores,
   useBenchmarkRecords,
+  useCloudLeaderboardStatus,
 } from '../store/benchmarkStore';
 import { useNexusStore } from '../store/nexusStore';
 import { responsesSession } from '../webmcp/responsesSessionManager';
+import { importWorldFromSeedOrUrl } from '../webmcp/worldDirector';
 
 const RADAR_AXES: Array<{ key: keyof Omit<SixDimensionScores, 'overallAvg'>; label: string }> = [
   { key: 'profitRoi', label: '收益经营ROI' },
@@ -53,7 +59,6 @@ const SixDimRadarSvg: React.FC<{
 
   return (
     <svg viewBox="0 0 270 245" className="mx-auto h-56 w-full max-w-[290px]">
-      {/* Concentric Hexagon Rings */}
       {[0.25, 0.5, 0.75, 1].map((lv) => {
         const ringPts = RADAR_AXES.map((_, i) => {
           const p = polarPoint(cx, cy, maxR * lv, i);
@@ -70,7 +75,6 @@ const SixDimRadarSvg: React.FC<{
         );
       })}
 
-      {/* Axis Spokes */}
       {RADAR_AXES.map((ax, i) => {
         const outer = polarPoint(cx, cy, maxR, i);
         const labelPos = polarPoint(cx, cy, maxR + 24, i);
@@ -98,7 +102,6 @@ const SixDimRadarSvg: React.FC<{
         );
       })}
 
-      {/* Optional Selected Leaderboard Comparison Polygon */}
       {compareScores && (
         <polygon
           points={buildPolygon(compareScores)}
@@ -109,7 +112,6 @@ const SixDimRadarSvg: React.FC<{
         />
       )}
 
-      {/* Current Live Run Polygon */}
       <polygon
         points={buildPolygon(scores)}
         fill="rgba(245, 158, 11, 0.25)"
@@ -137,23 +139,38 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
   activeRiderModelLabel,
 }) => {
   const worldMap = useNexusStore((s) => s.worldMap);
+  const orders = useNexusStore((s) => s.orders);
   const shift = useNexusStore((s) => s.shift);
   const rider = useNexusStore((s) => s.rider);
   const blindMode = useNexusStore((s) => s.benchmarkBlindMode);
-  const allRecords = useBenchmarkRecords();
 
-  const [sameSeedOnly, setSameSeedOnly] = useState(true);
+  const allRecords = useBenchmarkRecords();
+  const cloudStatus = useCloudLeaderboardStatus();
+
+  const [sameSeedOnly, setSameSeedOnly] = useState(false);
+  const [blindOnly, setBlindOnly] = useState(false);
   const [compareRecord, setCompareRecord] = useState<BenchmarkRunRecord | null>(null);
   const [customModelTag, setCustomModelTag] = useState('');
+  const [playerTag, setPlayerTag] = useState('');
   const [justSavedToast, setJustSavedToast] = useState<string | null>(null);
+  const [challengingId, setChallengingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      void benchmarkStore.fetchCloudLeaderboard();
+    }
+  }, [open]);
 
   if (!open) return null;
 
   const totalTokens = responsesSession.getState().cumulativeUsage.totalTokens;
   const liveRadar = computeSixDimensionScores({ shift, rider, totalTokens });
 
+  const unsyncedCount = allRecords.filter((r) => r.isLocalOwner && !r.syncedToCloud).length;
+
   const filteredRecords = allRecords
     .filter((r) => (!sameSeedOnly ? true : r.seedId === worldMap.seedId))
+    .filter((r) => (!blindOnly ? true : r.blindMode))
     .sort((a, b) => b.arenaScore - a.arenaScore);
 
   const precisionPct =
@@ -164,18 +181,60 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
       : 100;
 
   const handleSaveCurrentRun = () => {
+    if (shift.elapsedMinutes < 1) {
+      setJustSavedToast('请至少推进 1 分钟以上游戏进度后再提交上榜（建议跑满 180 分钟完整局）！');
+      window.setTimeout(() => setJustSavedToast(null), 3500);
+      return;
+    }
     const label = customModelTag.trim() || activeRiderModelLabel;
     const saved = benchmarkStore.recordRun({
       modelName: label,
+      playerTag: playerTag.trim() || undefined,
       seedId: worldMap.seedId,
       themeName: worldMap.themeName,
+      worldMap,
+      orders,
       blindMode,
       shift,
       rider,
       totalTokens,
     });
-    setJustSavedToast(`已将「${saved.modelName}」在种子 [${saved.seedId}] 下的战绩 (${saved.arenaScore}分) 计入榜单！`);
+    setJustSavedToast(
+      `已将「${saved.modelName}」在种子 [${saved.seedId}] 下的战绩 (${saved.arenaScore}分) 自动同步至全网云端排行榜！`,
+    );
+    window.setTimeout(() => setJustSavedToast(null), 4000);
+  };
+
+  const handleSyncUnsynced = async () => {
+    const res = await benchmarkStore.syncUnsyncedLocalRecordsToCloud();
+    setJustSavedToast(
+      res.uploaded > 0
+        ? `已成功将本地 ${res.uploaded} 条历史评测战绩同步至云端公共榜单！`
+        : '所有有效战绩均已与云端同步！',
+    );
     window.setTimeout(() => setJustSavedToast(null), 3500);
+  };
+
+  const handleChallengeSameWorld = async (rec: BenchmarkRunRecord, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setChallengingId(rec.id);
+    try {
+      await importWorldFromSeedOrUrl(rec.shareWorldToken || rec.seedId, {
+        syncUrlHash: true,
+      });
+      setCompareRecord(rec);
+      setJustSavedToast(
+        `已载入「${rec.themeName}」(${rec.seedId}) 同款地图与事件种子！现在可派你的模型出战 PK！`,
+      );
+      window.setTimeout(() => {
+        setJustSavedToast(null);
+        onClose();
+      }, 900);
+    } catch (err) {
+      setJustSavedToast(`载入同款种子失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setChallengingId(null);
+    }
   };
 
   return (
@@ -185,7 +244,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-amber-500/40 bg-slate-900 shadow-2xl"
+        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-amber-500/40 bg-slate-900 shadow-2xl"
       >
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-slate-800 px-5 py-3.5">
@@ -193,10 +252,24 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
             <div className="flex flex-wrap items-center gap-2">
               <Trophy className="h-4 w-4 text-amber-400" />
               <h2 className="text-sm font-bold text-white">
-                大模型 Agent 六维能力评测卡 &amp; 同种子竞技排行榜
+                全网云端大模型评测排行榜 &amp; 六维能力雷达卡
               </h2>
-              <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] text-emerald-300">
-                Seed: {worldMap.seedId}
+              <span
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                  cloudStatus.connected
+                    ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                    : 'border-amber-500/40 bg-amber-500/15 text-amber-300'
+                }`}
+              >
+                <Cloud className="h-3 w-3" />
+                {cloudStatus.loading || cloudStatus.syncing
+                  ? 'Supabase 云端同步中...'
+                  : cloudStatus.connected
+                    ? `云端实时已连线 (${cloudStatus.cloudCount} 条全网记录)`
+                    : '云端连接中'}
+              </span>
+              <span className="rounded-full border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] text-indigo-300">
+                当前种子: {worldMap.seedId}
               </span>
               {blindMode && (
                 <span className="rounded-full border border-rose-500/45 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] font-bold text-rose-300">
@@ -205,7 +278,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
               )}
             </div>
             <p className="mt-0.5 text-xs text-slate-400">
-              在相同世界种子下开启【硬核盲测模式】跑完 180 分钟（或中途快照上榜），客观对比不同大模型的路径运筹、风险规避、工具调用精准度与反注入能力。
+              战绩实时存储于 Supabase 云端公共库，所有人打开网页均可查看全网排行，并可点击任意战绩右侧【⚡ 挑战同款地图】一键复现完全相同的地图与事件进行公平对决！
             </p>
           </div>
 
@@ -233,21 +306,27 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
 
               <SixDimRadarSvg scores={liveRadar} compareScores={compareRecord?.radar} />
 
-              {compareRecord && (
+              {compareRecord ? (
                 <div className="flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-2.5 py-1 text-[11px] text-emerald-200">
-                  <span>绿虚线对比：{compareRecord.modelName} ({compareRecord.arenaScore}分)</span>
+                  <span className="truncate">
+                    绿虚线对比：{compareRecord.modelName} ({compareRecord.arenaScore}分)
+                  </span>
                   <button
                     type="button"
                     onClick={() => setCompareRecord(null)}
-                    className="text-slate-400 hover:text-white"
+                    className="ml-2 shrink-0 text-slate-400 hover:text-white"
                   >
-                    取消对比
+                    取消
                   </button>
+                </div>
+              ) : (
+                <div className="text-center text-[11px] text-slate-500">
+                  点击下方云端榜单任意一行，即可在雷达图叠加绿色虚线对比
                 </div>
               )}
             </div>
 
-            {/* Detailed Telemetry & Record Action */}
+            {/* Detailed Telemetry & Upload to Cloud Bar */}
             <div className="flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-950/90 p-4 lg:col-span-7">
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -323,23 +402,31 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Save Run to Leaderboard Bar */}
+              {/* Save & Upload Run to Cloud Leaderboard Bar */}
               <div className="mt-4 border-t border-slate-800 pt-3">
                 <div className="flex flex-wrap gap-2">
                   <input
                     type="text"
                     value={customModelTag}
                     onChange={(e) => setCustomModelTag(e.target.value)}
-                    placeholder={`自定义上榜模型备注（默认: ${activeRiderModelLabel}）`}
-                    className="min-w-[200px] flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100"
+                    placeholder={`上榜模型名（默认: ${activeRiderModelLabel}）`}
+                    className="min-w-[180px] flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100"
+                  />
+                  <input
+                    type="text"
+                    value={playerTag}
+                    onChange={(e) => setPlayerTag(e.target.value)}
+                    placeholder="测试者署名(选填)"
+                    className="w-32 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-slate-100"
                   />
                   <button
                     type="button"
+                    disabled={cloudStatus.syncing}
                     onClick={handleSaveCurrentRun}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-1.5 font-bold text-slate-950 hover:bg-amber-400"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-1.5 font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
                   >
                     <BookmarkPlus className="h-3.5 w-3.5" />
-                    记录当前战绩上榜
+                    上传当前战绩上云榜
                   </button>
                 </div>
                 {justSavedToast && (
@@ -347,52 +434,83 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                     ✓ {justSavedToast}
                   </p>
                 )}
+                {cloudStatus.error && (
+                  <p className="mt-1.5 text-[11px] text-rose-300">
+                    云端同步提示：{cloudStatus.error}（本地已自动备份）
+                  </p>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Bottom: Same-Seed Model Leaderboard Table */}
+          {/* Bottom: Global Cloud Leaderboard Table */}
           <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Award className="h-4 w-4 text-amber-400" />
                 <span className="font-bold text-white">
-                  大模型跑单评测排行榜（点击任意行可在上方雷达图叠加对比！）
+                  全网实时公共排行榜（自动汇集所有玩家跑完上传的大模型成绩）
                 </span>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {unsyncedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={cloudStatus.syncing}
+                    onClick={() => void handleSyncUnsynced()}
+                    className="inline-flex items-center gap-1 rounded-lg border border-sky-500/45 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-200 hover:bg-sky-500/25"
+                  >
+                    <CloudUpload className="h-3 w-3" />
+                    同步本地历史 ({unsyncedCount})
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setSameSeedOnly((v) => !v)}
                   className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium ${
                     sameSeedOnly
                       ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-200'
-                      : 'border-slate-700 bg-slate-900 text-slate-300'
+                      : 'border-slate-700 bg-slate-900 text-slate-300 hover:text-white'
                   }`}
                 >
                   <Filter className="h-3 w-3" />
-                  {sameSeedOnly ? `仅看同种子 (${worldMap.seedId})` : '显示全部种子记录'}
+                  {sameSeedOnly ? `仅看当前种子 (${worldMap.seedId})` : '全网全部种子总榜'}
                 </button>
-                {allRecords.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      benchmarkStore.clearAll();
-                      setCompareRecord(null);
-                    }}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] text-slate-400 hover:text-rose-300"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                    清空榜单
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setBlindOnly((v) => !v)}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium ${
+                    blindOnly
+                      ? 'border-rose-500/45 bg-rose-500/15 text-rose-200'
+                      : 'border-slate-700 bg-slate-900 text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Target className="h-3 w-3" />
+                  {blindOnly ? '仅看硬核盲测' : '全部模式'}
+                </button>
+                <button
+                  type="button"
+                  disabled={cloudStatus.loading}
+                  onClick={() => void benchmarkStore.fetchCloudLeaderboard()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-white"
+                >
+                  <RefreshCw className={`h-3 w-3 ${cloudStatus.loading ? 'animate-spin' : ''}`} />
+                  刷新云榜
+                </button>
               </div>
             </div>
 
-            {filteredRecords.length === 0 ? (
+            {cloudStatus.loading && filteredRecords.length === 0 ? (
+              <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-slate-800 py-10 text-slate-400">
+                <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
+                正在从 Supabase 云端拉取全网大模型战绩...
+              </div>
+            ) : filteredRecords.length === 0 ? (
               <div className="rounded-lg border border-dashed border-slate-800 py-8 text-center text-slate-400">
-                当前种子 [{worldMap.seedId}] 暂无上榜记录。点击上方【记录当前战绩上榜】或跑完 180 分钟班次将自动入榜！
+                {sameSeedOnly
+                  ? `种子 [${worldMap.seedId}] 暂无云端记录（可切换右上方「全网全部种子总榜」查看其它地图战绩，或跑完本局拿下首杀榜首！）`
+                  : '云端排行榜虚位以待！跑完 180 分钟班次将自动上云，或点击上方【上传当前战绩上云榜】抢占首个席位！'}
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -400,20 +518,21 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400">
                       <th className="pb-2 pr-2">排名</th>
-                      <th className="pb-2 pr-3">评测模型</th>
-                      <th className="pb-2 pr-2">模式 / 种子</th>
+                      <th className="pb-2 pr-3">评测模型 / 提交者</th>
+                      <th className="pb-2 pr-2">模式 / 世界种子</th>
                       <th className="pb-2 pr-2">总分</th>
                       <th className="pb-2 pr-2">六维均分</th>
-                      <th className="pb-2 pr-2">完单 / 准时率</th>
-                      <th className="pb-2 pr-2">工具精准度</th>
-                      <th className="pb-2 pr-2">钱包结余</th>
+                      <th className="pb-2 pr-2">完单 / 准时</th>
+                      <th className="pb-2 pr-2">精准度</th>
+                      <th className="pb-2 pr-2">净钱包</th>
                       <th className="pb-2 pr-2">Tokens</th>
-                      <th className="pb-2 text-right">操作</th>
+                      <th className="pb-2 text-right">同图挑战</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/70">
                     {filteredRecords.map((rec, idx) => {
                       const isComparing = compareRecord?.id === rec.id;
+                      const isCurrentSeed = rec.seedId === worldMap.seedId;
                       const toolAcc =
                         rec.totalToolCalls > 0
                           ? Math.round(
@@ -431,12 +550,33 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                               : 'text-slate-200 hover:bg-slate-900/90'
                           }`}
                         >
-                          <td className="py-2 pr-2 font-mono font-bold text-amber-300">
+                          <td className="py-2.5 pr-2 font-mono font-bold text-amber-300">
                             #{idx + 1}
                           </td>
-                          <td className="py-2 pr-3 font-semibold">{rec.modelName}</td>
-                          <td className="py-2 pr-2">
-                            <div className="flex items-center gap-1">
+                          <td className="py-2.5 pr-3">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-semibold text-white">{rec.modelName}</span>
+                              {rec.playerTag && (
+                                <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+                                  @{rec.playerTag}
+                                </span>
+                              )}
+                              {rec.syncedToCloud ? (
+                                <span className="rounded bg-emerald-500/15 px-1 py-0.2 text-[9px] text-emerald-300">
+                                  ☁️云端
+                                </span>
+                              ) : (
+                                <span className="rounded bg-amber-500/15 px-1 py-0.2 text-[9px] text-amber-300">
+                                  待同步
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 text-[10px] text-slate-500">
+                              {rec.recordedAt} · 跑满 {rec.elapsedMinutes}m · {rec.themeName}
+                            </div>
+                          </td>
+                          <td className="py-2.5 pr-2">
+                            <div className="flex flex-wrap items-center gap-1">
                               {rec.blindMode ? (
                                 <span className="inline-flex items-center gap-0.5 rounded bg-rose-500/20 px-1.5 py-0.2 text-[10px] text-rose-300">
                                   <Target className="h-2.5 w-2.5" />
@@ -448,41 +588,41 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                                   辅助
                                 </span>
                               )}
-                              <span className="font-mono text-[10px] text-slate-400">
+                              <span
+                                className={`font-mono text-[10px] ${
+                                  isCurrentSeed ? 'font-bold text-emerald-300' : 'text-slate-400'
+                                }`}
+                              >
                                 {rec.seedId}
                               </span>
                             </div>
                           </td>
-                          <td className="py-2 pr-2 font-mono font-bold text-amber-300">
+                          <td className="py-2.5 pr-2 font-mono text-xs font-bold text-amber-300">
                             {rec.arenaScore}
                           </td>
-                          <td className="py-2 pr-2 font-mono text-indigo-300">
+                          <td className="py-2.5 pr-2 font-mono text-indigo-300">
                             {rec.radar.overallAvg}/100
                           </td>
-                          <td className="py-2 pr-2 font-mono">
+                          <td className="py-2.5 pr-2 font-mono">
                             {rec.deliveriesCompleted}单 · {rec.onTimeRatePct}%
                           </td>
-                          <td className="py-2 pr-2 font-mono text-sky-300">{toolAcc}%</td>
-                          <td className="py-2 pr-2 font-mono text-emerald-300">
+                          <td className="py-2.5 pr-2 font-mono text-sky-300">{toolAcc}%</td>
+                          <td className="py-2.5 pr-2 font-mono text-emerald-300">
                             ¥{rec.walletYuan.toFixed(1)}
                           </td>
-                          <td className="py-2 pr-2 font-mono text-slate-400">
+                          <td className="py-2.5 pr-2 font-mono text-slate-400">
                             {rec.totalTokens > 0 ? `${(rec.totalTokens / 1000).toFixed(1)}k` : '-'}
                           </td>
-                          <td
-                            className="py-2 text-right"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              benchmarkStore.deleteRecord(rec.id);
-                              if (isComparing) setCompareRecord(null);
-                            }}
-                          >
+                          <td className="py-2.5 text-right">
                             <button
                               type="button"
-                              className="text-slate-500 hover:text-rose-400"
-                              title="删除该条记录"
+                              disabled={challengingId === rec.id}
+                              onClick={(e) => void handleChallengeSameWorld(rec, e)}
+                              title="一键载入该条记录同款地图、订单与局中事件种子，用你的模型同场对决！"
+                              className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-indigo-500/45 bg-indigo-500/15 px-2 py-1 text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/30"
                             >
-                              删除
+                              <Swords className="h-3 w-3 text-indigo-300" />
+                              {challengingId === rec.id ? '载入中...' : '挑战同款种子'}
                             </button>
                           </td>
                         </tr>
