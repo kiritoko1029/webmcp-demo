@@ -6,7 +6,13 @@ import {
   formatShiftClock,
   nexusStore,
 } from '../store/nexusStore';
-import type { ActiveModule, FoodCategory, MapPoint, ToolScopeMode } from '../types/domain';
+import type {
+  ActiveModule,
+  FoodCategory,
+  MapPoint,
+  RouteChoice,
+  ToolScopeMode,
+} from '../types/domain';
 import { interactWithWorldNpc, spawnDynamicOrdersWave } from './worldDirector';
 
 function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
@@ -54,26 +60,89 @@ function segmentHitsHazard(a: MapPoint, b: MapPoint, c: MapPoint, radius: number
   return Math.hypot(c.x - projX, c.y - projY) <= radius;
 }
 
-/**
- * Simulates moving the rider from current position to `destPos`, computing:
- * - Game clock elapsed minutes
- * - Battery & stamina drain (modified by weather, slope hazards, upgrades, low stamina)
- * - Fragile meal integrity damage (if carrying soup/cake through bumpy/wet hazards or sprinting)
- */
-function applyTravelPhysics(
+function buildRouteWaypoints(
+  startPos: MapPoint,
   destPos: MapPoint,
-  destLabel: string,
-  pace: 'careful_steady' | 'normal_cruise' | 'turbo_sprint',
-): {
+  routeChoice: RouteChoice,
+): MapPoint[] {
+  if (routeChoice === 'shortest_direct') {
+    return [{ ...startPos }, { ...destPos }];
+  }
+  // Safe arterial detour routes via northern (y=88) or southern (y=342) perimeter boulevard to bypass central hazards
+  const perimeterY = (startPos.y + destPos.y) / 2 < 205 ? 86 : 342;
+  return [
+    { ...startPos },
+    { x: startPos.x, y: perimeterY },
+    { x: destPos.x, y: perimeterY },
+    { ...destPos },
+  ];
+}
+
+function interpolateWaypoints(waypoints: MapPoint[], ratio: number): MapPoint {
+  if (waypoints.length < 2) return waypoints[0] ?? { x: 295, y: 210 };
+  const segLengths: number[] = [];
+  let totalLen = 0;
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const d = Math.hypot(
+      waypoints[i + 1].x - waypoints[i].x,
+      waypoints[i + 1].y - waypoints[i].y,
+    );
+    segLengths.push(d);
+    totalLen += d;
+  }
+  if (totalLen <= 1) return { ...waypoints[waypoints.length - 1] };
+
+  const targetDist = Math.max(0, Math.min(1, ratio)) * totalLen;
+  let acc = 0;
+  for (let i = 0; i < segLengths.length; i++) {
+    const seg = segLengths[i];
+    if (acc + seg >= targetDist || i === segLengths.length - 1) {
+      const localT = seg > 0 ? (targetDist - acc) / seg : 1;
+      return {
+        x: Math.round(waypoints[i].x + (waypoints[i + 1].x - waypoints[i].x) * localT),
+        y: Math.round(waypoints[i].y + (waypoints[i + 1].y - waypoints[i].y) * localT),
+      };
+    }
+    acc += seg;
+  }
+  return { ...waypoints[waypoints.length - 1] };
+}
+
+/**
+ * Animates the rider scooter smoothly across the map and computes travel physics:
+ * - Supports `routeChoice`: `shortest_direct` (fast, crosses hazard zones) vs. `detour_safe_road` (+36% distance, 0 hazards!)
+ * - Advances game clock, drains battery/stamina, applies fragile cake/soup damage, and logs a visual trail hop!
+ */
+async function animateAndApplyTravel(params: {
+  destPos: MapPoint;
+  destLabel: string;
+  pace: 'careful_steady' | 'normal_cruise' | 'turbo_sprint';
+  routeChoice?: RouteChoice;
+  actionSummaryPrefix: string;
+  signal?: AbortSignal;
+  skipAnimation?: boolean;
+}): Promise<{
   travelMinutes: number;
   distanceKm: number;
   batteryUsed: number;
+  routeChoice: RouteChoice;
   hazardsCrossed: string[];
   damagedOrderIds: string[];
   emergencyTowPenaltyYuan: number;
-} {
-  const s = nexusStore.getState();
-  const startPos = s.rider.pos;
+}> {
+  const {
+    destPos,
+    destLabel,
+    pace,
+    routeChoice = 'shortest_direct',
+    actionSummaryPrefix,
+    signal,
+    skipAnimation = false,
+  } = params;
+
+  const initialSnap = nexusStore.getState();
+  const startPos = { ...initialSnap.rider.pos };
+  const fromLabel = initialSnap.rider.currentArea;
   const pxDist = Math.hypot(destPos.x - startPos.x, destPos.y - startPos.y);
 
   if (pxDist < 8) {
@@ -81,16 +150,66 @@ function applyTravelPhysics(
       travelMinutes: 0,
       distanceKm: 0,
       batteryUsed: 0,
+      routeChoice,
       hazardsCrossed: [],
       damagedOrderIds: [],
       emergencyTowPenaltyYuan: 0,
     };
   }
 
-  const distanceKm = Number(Math.max(0.3, pxDist / 220).toFixed(2));
-  const crossed = s.worldMap.hazards.filter((h) =>
-    segmentHitsHazard(startPos, destPos, h.pos, h.radius),
+  const waypoints = buildRouteWaypoints(startPos, destPos, routeChoice);
+  const paceLabel =
+    pace === 'careful_steady' ? '稳骑护餐' : pace === 'turbo_sprint' ? '狂飙冲刺' : '常规巡航';
+  const routeLabel = routeChoice === 'detour_safe_road' ? '安全大道绕行' : '直线抄近道';
+
+  // Smooth 3-step visual animation (~360ms total) so the user clearly sees every movement on the radar!
+  if (!skipAnimation) {
+    const frames = [0.34, 0.68, 1.0];
+    nexusStore.patch({
+      activeRiderBubble: `🛵 ${paceLabel}·${routeLabel} → ${destLabel.slice(0, 10)}`,
+      rideSimulation: {
+        rideId: `MOVE-${Date.now()}`,
+        status: 'riding',
+        targetTitle: destLabel,
+        progress: 15,
+        stageText: `🛵 [${paceLabel} · ${routeLabel}] 驶向「${destLabel}」...`,
+      },
+    });
+
+    for (let i = 0; i < frames.length; i++) {
+      const r = frames[i];
+      if (signal) {
+        await sleepWithAbort(115, signal);
+      } else {
+        await new Promise((res) => setTimeout(res, 115));
+      }
+      const midPos = interpolateWaypoints(waypoints, r);
+      nexusStore.update((prev) => ({
+        ...prev,
+        rider: { ...prev.rider, pos: midPos },
+        rideSimulation: {
+          ...prev.rideSimulation,
+          progress: Math.round(r * 100),
+          stageText:
+            r < 1
+              ? `🛵 [${paceLabel} · ${routeLabel}] 正在前往「${destLabel}」(${Math.round(r * 100)}%)...`
+              : `📍 已抵达「${destLabel}」`,
+        },
+      }));
+    }
+  }
+
+  const s = nexusStore.getState();
+  const baseKm = Math.max(0.3, pxDist / 220);
+  const distanceKm = Number(
+    (baseKm * (routeChoice === 'detour_safe_road' ? 1.36 : 1.0)).toFixed(2),
   );
+
+  // `detour_safe_road` completely bypasses hazard circles; `shortest_direct` intersects hazards on line segment!
+  const crossed =
+    routeChoice === 'detour_safe_road'
+      ? []
+      : s.worldMap.hazards.filter((h) => segmentHitsHazard(startPos, destPos, h.pos, h.radius));
 
   const paceTimeMult =
     pace === 'turbo_sprint' ? 0.7 : pace === 'careful_steady' ? 1.28 : 1.0;
@@ -132,15 +251,16 @@ function applyTravelPhysics(
     if (nextBattery <= 0) {
       emergencyTowPenaltyYuan = 25;
       extraTowMin = 15;
-      nextBattery = 45; // Emergency roadside rescue charge
+      nextBattery = 45;
       nextWallet = Number(Math.max(0, nextWallet - emergencyTowPenaltyYuan).toFixed(2));
       nextPenalties = Number((nextPenalties + emergencyTowPenaltyYuan).toFixed(2));
     }
 
     const nextOrders = prev.orders.map((o) => {
-      let updated = extraTowMin > 0 && o.stage !== 'delivered' && o.stage !== 'dropped'
-        ? { ...o, minutesLeft: o.minutesLeft - extraTowMin }
-        : o;
+      let updated =
+        extraTowMin > 0 && o.stage !== 'delivered' && o.stage !== 'dropped'
+          ? { ...o, minutesLeft: o.minutesLeft - extraTowMin }
+          : o;
 
       if (updated.stage === 'delivering' && updated.fragileTag !== 'none') {
         let dmg = 0;
@@ -188,10 +308,38 @@ function applyTravelPhysics(
         shiftEnded: nextElapsed >= prev.shift.totalShiftMinutes,
         penaltiesYuan: nextPenalties,
         arenaScore: Math.max(0, prev.shift.arenaScore - (emergencyTowPenaltyYuan > 0 ? 80 : 0)),
+        safeDetoursCount:
+          prev.shift.safeDetoursCount + (routeChoice === 'detour_safe_road' ? 1 : 0),
+        hazardsHitCount: prev.shift.hazardsHitCount + crossed.length,
+        batteryBreakdownsCount:
+          prev.shift.batteryBreakdownsCount + (emergencyTowPenaltyYuan > 0 ? 1 : 0),
+      },
+      rideSimulation: {
+        ...prev.rideSimulation,
+        status: 'arrived',
+        progress: 100,
+        stageText: `已抵达「${destLabel}」(${routeLabel} ${distanceKm}km · 耗时 ${travelMinutes}分 · 耗电 ${batteryUsed}%)`,
       },
       orders: nextOrders,
       plannedStops: buildDefaultStops(nextOrders, destPos),
     };
+  });
+
+  const hopSummary = `${actionSummaryPrefix} → ${destLabel.slice(0, 10)} (${routeLabel}·${travelMinutes}分)`;
+  nexusStore.appendRiderHop({
+    fromPos: startPos,
+    waypoints,
+    toPos: { ...destPos },
+    fromLabel,
+    toLabel: destLabel,
+    pace,
+    routeChoice,
+    distanceKm,
+    travelMinutes,
+    batteryUsed,
+    hazardsHit: crossed.map((h) => h.name),
+    damagedOrderIds,
+    summary: hopSummary,
   });
 
   if (emergencyTowPenaltyYuan > 0) {
@@ -207,6 +355,7 @@ function applyTravelPhysics(
     travelMinutes,
     distanceKm,
     batteryUsed,
+    routeChoice,
     hazardsCrossed: crossed.map((h) => h.name),
     damagedOrderIds,
     emergencyTowPenaltyYuan,
@@ -216,7 +365,10 @@ function applyTravelPhysics(
 export async function registerCoreAndDebugTools(
   mc: WebMCP.ModelContext,
   signal: AbortSignal,
+  options?: { includeDebugTools?: boolean },
 ): Promise<void> {
+  const includeDebug = options?.includeDebugTools !== false;
+
   await safeRegister(
     mc,
     {
@@ -259,9 +411,9 @@ export async function registerCoreAndDebugTools(
     mc,
     {
       name: 'rider.get_shift_summary',
-      title: '观测游戏全局态势雷达 (时间/电量/体力/箱容/订单/地图风险)',
+      title: '观测游戏全局态势雷达 (时间/电量/体力/箱容/坐标/道路风险)',
       description:
-        'Primary tactical observation tool for the Rider LLM. Returns current shift clock, remaining shift minutes, Arena score & rank, battery %, stamina %, box slots used/max, equipment upgrades, active delivery box orders, hazard zones, and nearby stations.',
+        'Primary tactical observation tool for the Rider LLM. Returns shift clock, remaining minutes, Arena score & rank, rider (x,y) coordinates, battery %, stamina %, box slots used/max, equipment upgrades, active delivery box orders with coordinates & direct-path hazard warnings, hazard circles, and nearby stations.',
       annotations: { readOnlyHint: true },
       inputSchema: { type: 'object', properties: {} },
       async execute() {
@@ -274,29 +426,40 @@ export async function registerCoreAndDebugTools(
               o.stage === 'at_store' ||
               o.stage === 'delivering',
           )
-          .map((o) => ({
-            orderId: o.orderId,
-            stage: o.stage,
-            merchantName: o.merchantName,
-            pickupSeq: o.pickupSeq,
-            prepMinutesRemaining: o.prepMinutesRemaining,
-            dropoffAddress: o.dropoffAddress,
-            dropoffMode: o.dropoffMode,
-            hasElevator: o.hasElevator,
-            floor: o.floor,
-            fragileTag: o.fragileTag,
-            weightSlots: o.weightSlots,
-            mealIntegrityPct: o.mealIntegrityPct,
-            minutesLeft: o.minutesLeft,
-            feeYuan: o.feeYuan,
-            tipBonusYuan: o.tipBonusYuan,
-            lockerReceipt: o.lockerReceipt ?? null,
-          }));
+          .map((o) => {
+            const targetPos = o.stage === 'delivering' ? o.customerPos : o.merchantPos;
+            const directHazards = s.worldMap.hazards
+              .filter((h) => segmentHitsHazard(s.rider.pos, targetPos, h.pos, h.radius))
+              .map((h) => `${h.name}(${h.type})`);
+            return {
+              orderId: o.orderId,
+              stage: o.stage,
+              merchantName: o.merchantName,
+              merchantPos: o.merchantPos,
+              pickupSeq: o.pickupSeq,
+              prepMinutesRemaining: o.prepMinutesRemaining,
+              dropoffAddress: o.dropoffAddress,
+              customerPos: o.customerPos,
+              dropoffMode: o.dropoffMode,
+              hasElevator: o.hasElevator,
+              floor: o.floor,
+              fragileTag: o.fragileTag,
+              weightSlots: o.weightSlots,
+              mealIntegrityPct: o.mealIntegrityPct,
+              minutesLeft: o.minutesLeft,
+              feeYuan: o.feeYuan,
+              tipBonusYuan: o.tipBonusYuan,
+              lockerReceipt: o.lockerReceipt ?? null,
+              directPathHazardsFromRider: directHazards,
+            };
+          });
         const poolCount = s.orders.filter((o) => o.stage === 'pool').length;
         const rank = computeArenaRank(s.shift.arenaScore);
 
         return {
+          benchmarkBlindMode: s.benchmarkBlindMode,
           worldTheme: s.worldMap.themeName,
+          seedId: s.worldMap.seedId,
           gameClock: formatShiftClock(s.shift.elapsedMinutes),
           shiftRemainingMinutes: s.shift.totalShiftMinutes - s.shift.elapsedMinutes,
           shiftEnded: s.shift.shiftEnded,
@@ -328,10 +491,18 @@ export async function registerCoreAndDebugTools(
             name: h.name,
             type: h.type,
             pos: h.pos,
+            radius: h.radius,
             effect: h.effectNote,
           })),
           stations: s.worldMap.stations,
-          nextSuggestedStop: s.plannedStops[0]?.title ?? '暂无待跑站点，建议扫描抢单大厅',
+          ...(s.benchmarkBlindMode
+            ? {
+                routingNotice:
+                  '硬核盲测模式已开启：请自行结合各单坐标、directPathHazardsFromRider 与剩余时限规划取送顺序及 routeChoice (shortest_direct vs detour_safe_road)！',
+              }
+            : {
+                nextSuggestedStop: s.plannedStops[0]?.title ?? '暂无待跑站点，建议扫描抢单大厅',
+              }),
         };
       },
     },
@@ -479,6 +650,11 @@ export async function registerCoreAndDebugTools(
     },
     signal,
   );
+
+  // In Hardcore Blind Benchmark Mode (`includeDebug === false`), do NOT expose cheat/debug tools!
+  if (!includeDebug) {
+    return;
+  }
 
   await safeRegister(
     mc,
@@ -646,24 +822,32 @@ export async function registerDispatchTools(
           freeBoxSlots: freeSlots,
           maxBoxSlots: s.rider.maxBoxSlots,
           poolCount: pool.length,
-          orders: pool.map((o) => ({
-            orderId: o.orderId,
-            category: o.category,
-            fragileTag: o.fragileTag,
-            weightSlots: o.weightSlots,
-            fitsCurrentBox: o.weightSlots <= freeSlots,
-            merchantName: o.merchantName,
-            prepMinutesRemaining: o.prepMinutesRemaining,
-            dropoffAddress: o.dropoffAddress,
-            hasElevator: o.hasElevator,
-            floor: o.floor,
-            dropoffMode: o.dropoffMode,
-            feeYuan: o.feeYuan,
-            tipBonusYuan: o.tipBonusYuan,
-            distanceKm: o.distanceKm,
-            minutesLeft: o.minutesLeft,
-            items: o.items,
-          })),
+          orders: pool.map((o) => {
+            const deliveryHazards = s.worldMap.hazards
+              .filter((h) => segmentHitsHazard(o.merchantPos, o.customerPos, h.pos, h.radius))
+              .map((h) => `${h.name}(${h.type})`);
+            return {
+              orderId: o.orderId,
+              category: o.category,
+              fragileTag: o.fragileTag,
+              weightSlots: o.weightSlots,
+              fitsCurrentBox: o.weightSlots <= freeSlots,
+              merchantName: o.merchantName,
+              merchantPos: o.merchantPos,
+              prepMinutesRemaining: o.prepMinutesRemaining,
+              dropoffAddress: o.dropoffAddress,
+              customerPos: o.customerPos,
+              hasElevator: o.hasElevator,
+              floor: o.floor,
+              dropoffMode: o.dropoffMode,
+              feeYuan: o.feeYuan,
+              tipBonusYuan: o.tipBonusYuan,
+              distanceKm: o.distanceKm,
+              minutesLeft: o.minutesLeft,
+              directDeliveryHazards: deliveryHazards,
+              items: o.items,
+            };
+          }),
         };
       },
     },
@@ -877,9 +1061,9 @@ export async function registerDispatchTools(
     mc,
     {
       name: 'orders.arrive_and_pickup',
-      title: '骑行到店并扫码取餐 (含等餐时间与驾驶档位选择)',
+      title: '骑行到店并扫码取餐 (可选稳骑/冲刺 + 抄近道/安全大道绕行)',
       description:
-        'Rides to the order’s restaurant if not already there, optionally waits for remaining kitchen prep minutes, and picks up the meal into delivering stage.',
+        'Rides to the order’s restaurant, optionally waits for remaining kitchen prep minutes, and picks up the meal into delivering stage. Supports `pace` AND `routeChoice` (`shortest_direct` is faster/cheaper battery but crosses hazard zones; `detour_safe_road` adds +36% distance to bypass all bumpy/flooded hazards safely!).',
       annotations: { readOnlyHint: false },
       inputSchema: {
         type: 'object',
@@ -891,6 +1075,12 @@ export async function registerDispatchTools(
             default: 'normal_cruise',
             description: 'Riding speed mode on the way to the store (careful_steady protects fragile meals already in box)',
           },
+          routeChoice: {
+            type: 'string',
+            enum: ['shortest_direct', 'detour_safe_road'],
+            default: 'shortest_direct',
+            description: 'Route strategy: shortest_direct (straight shortcut, hits hazards on path) vs detour_safe_road (+36% distance via perimeter avenue, bypasses all hazards)',
+          },
           forceWaitAndPickup: {
             type: 'boolean',
             default: true,
@@ -899,14 +1089,16 @@ export async function registerDispatchTools(
         },
         required: ['orderId'],
       },
-      async execute(raw) {
+      async execute(raw, { signal: execSignal }) {
         const {
           orderId,
           pace = 'normal_cruise',
+          routeChoice = 'shortest_direct',
           forceWaitAndPickup = true,
         } = raw as {
           orderId: string;
           pace?: 'careful_steady' | 'normal_cruise' | 'turbo_sprint';
+          routeChoice?: RouteChoice;
           forceWaitAndPickup?: boolean;
         };
 
@@ -921,11 +1113,14 @@ export async function registerDispatchTools(
           throw new Error(`订单 ${orderId} 已结束 (${initialOrder.stage})`);
         }
 
-        const travel = applyTravelPhysics(
-          initialOrder.merchantPos,
-          initialOrder.merchantName,
+        const travel = await animateAndApplyTravel({
+          destPos: initialOrder.merchantPos,
+          destLabel: initialOrder.merchantName,
           pace,
-        );
+          routeChoice,
+          actionSummaryPrefix: `取餐 ${initialOrder.pickupSeq}`,
+          signal: execSignal,
+        });
 
         // Re-read order after travel clock advance
         const afterTravelOrder = nexusStore
@@ -967,9 +1162,12 @@ export async function registerDispatchTools(
           pickupSeq: initialOrder.pickupSeq,
           merchantName: initialOrder.merchantName,
           newStage: nextStage,
+          routeChoice,
+          distanceKm: travel.distanceKm,
           travelMinutes: travel.travelMinutes,
           waitedKitchenMinutes: waitedMinutes,
           hazardsCrossed: travel.hazardsCrossed,
+          damagedOrderIds: travel.damagedOrderIds,
           batteryPct: nexusStore.getState().rider.batteryPct,
         };
       },
@@ -981,9 +1179,9 @@ export async function registerDispatchTools(
     mc,
     {
       name: 'orders.complete_delivery',
-      title: '骑行送达顾客并结算收益/小费/连击与餐损爬楼物理',
+      title: '骑行送达顾客并结算收益 (含档位选择 + 抄近道/安全绕行抉择)',
       description:
-        'Rides to the customer dropoff building (choosing pace to balance SLA vs. fragile cake/soup damage), climbs stairs if no elevator, settles base fee + combo bonus + intact tip (or late/spill penalties), and updates Arena score.',
+        'Rides to the customer dropoff building, climbs stairs if no elevator, settles base fee + combo bonus + intact tip (or late/spill penalties), and updates Arena score. Supports `pace` AND `routeChoice` (`shortest_direct` vs `detour_safe_road` +36% distance bypassing bumpy/flooded hazards).',
       annotations: { readOnlyHint: false },
       inputSchema: {
         type: 'object',
@@ -995,18 +1193,26 @@ export async function registerDispatchTools(
             default: 'normal_cruise',
             description: 'Use careful_steady when delivering cream_cake or hot_soup across bumpy zones!',
           },
+          routeChoice: {
+            type: 'string',
+            enum: ['shortest_direct', 'detour_safe_road'],
+            default: 'shortest_direct',
+            description: 'Route strategy: shortest_direct (fast shortcut, hits hazards on path) vs detour_safe_road (+36% distance via perimeter road, 0 hazard damage)',
+          },
           proofNote: { type: 'string', description: 'Optional delivery proof note' },
         },
         required: ['orderId'],
       },
-      async execute(raw) {
+      async execute(raw, { signal: execSignal }) {
         const {
           orderId,
           pace = 'normal_cruise',
+          routeChoice = 'shortest_direct',
           proofNote = '妥投核销完成',
         } = raw as {
           orderId: string;
           pace?: 'careful_steady' | 'normal_cruise' | 'turbo_sprint';
+          routeChoice?: RouteChoice;
           proofNote?: string;
         };
 
@@ -1020,7 +1226,14 @@ export async function registerDispatchTools(
           );
         }
 
-        const travel = applyTravelPhysics(before.customerPos, before.dropoffAddress, pace);
+        const travel = await animateAndApplyTravel({
+          destPos: before.customerPos,
+          destLabel: before.dropoffAddress,
+          pace,
+          routeChoice,
+          actionSummaryPrefix: `送达 ${before.orderId}`,
+          signal: execSignal,
+        });
 
         // Stair climbing stamina & time cost for walkup buildings without elevator!
         const curState = nexusStore.getState();
@@ -1236,42 +1449,47 @@ export async function registerDispatchTools(
 export async function registerNavigationTools(
   mc: WebMCP.ModelContext,
   signal: AbortSignal,
+  options?: { includeRouteHelper?: boolean },
 ): Promise<void> {
-  await safeRegister(
-    mc,
-    {
-      name: 'navigation.plan_optimal_route',
-      title: '计算手中多单最优顺路与紧急度排序',
-      description:
-        'Computes the best pickup and dropoff waypoint sequence factoring both street distance and remaining SLA minutes.',
-      annotations: { readOnlyHint: false },
-      inputSchema: { type: 'object', properties: {} },
-      async execute() {
-        nexusStore.recomputeRoute();
-        nexusStore.patch({ activeModule: 'map' });
-        const stops = nexusStore.getState().plannedStops;
-        return {
-          totalStops: stops.length,
-          orderedStops: stops.map((s, idx) => ({
-            seq: idx + 1,
-            action: s.action === 'pickup' ? '到店取餐' : '送餐上门',
-            orderId: s.orderId,
-            title: s.title,
-            minutesLeft: s.minutesLeft,
-          })),
-        };
+  const includeHelper = options?.includeRouteHelper !== false;
+
+  if (includeHelper) {
+    await safeRegister(
+      mc,
+      {
+        name: 'navigation.plan_optimal_route',
+        title: '计算手中多单最优顺路与紧急度排序',
+        description:
+          'Computes the best pickup and dropoff waypoint sequence factoring both street distance and remaining SLA minutes.',
+        annotations: { readOnlyHint: false },
+        inputSchema: { type: 'object', properties: {} },
+        async execute() {
+          nexusStore.recomputeRoute();
+          nexusStore.patch({ activeModule: 'map' });
+          const stops = nexusStore.getState().plannedStops;
+          return {
+            totalStops: stops.length,
+            orderedStops: stops.map((s, idx) => ({
+              seq: idx + 1,
+              action: s.action === 'pickup' ? '到店取餐' : '送餐上门',
+              orderId: s.orderId,
+              title: s.title,
+              minutesLeft: s.minutesLeft,
+            })),
+          };
+        },
       },
-    },
-    signal,
-  );
+      signal,
+    );
+  }
 
   await safeRegister(
     mc,
     {
       name: 'navigation.ride_to_next_stop',
-      title: '驾驶小电驴前往下一站 (可选稳骑护蛋糕/冲刺抢时效 + AbortSignal 刹车)',
+      title: '驾驶小电驴前往下一站 (可选稳骑/冲刺 + 抄近道/安全绕行 + AbortSignal)',
       description:
-        'Animates an electric scooter ride across the city street map toward the next stop, advancing the shift clock and simulating hazard zones. Supports careful_steady, normal_cruise, or turbo_sprint pace and AbortSignal cancellation.',
+        'Animates an electric scooter ride across the city street map toward the next stop, advancing the shift clock and simulating hazard zones. Supports speedMode, routeChoice (shortest_direct vs detour_safe_road), and AbortSignal cancellation.',
       annotations: { readOnlyHint: false },
       inputSchema: {
         type: 'object',
@@ -1281,11 +1499,21 @@ export async function registerNavigationTools(
             enum: ['careful_steady', 'normal_cruise', 'turbo_sprint'],
             description: 'Driving style: careful_steady prevents fragile cake/soup damage; turbo_sprint saves time at higher battery & spill risk',
           },
+          routeChoice: {
+            type: 'string',
+            enum: ['shortest_direct', 'detour_safe_road'],
+            default: 'shortest_direct',
+            description: 'shortest_direct (shortcut) vs detour_safe_road (+36% distance, bypasses all hazards)',
+          },
         },
       },
       async execute(raw, { signal: execSignal }) {
-        const { speedMode = 'normal_cruise' } = raw as {
+        const {
+          speedMode = 'normal_cruise',
+          routeChoice = 'shortest_direct',
+        } = raw as {
           speedMode?: 'careful_steady' | 'normal_cruise' | 'turbo_sprint';
+          routeChoice?: RouteChoice;
         };
         nexusStore.recomputeRoute();
         const initialState = nexusStore.getState();
@@ -1294,50 +1522,16 @@ export async function registerNavigationTools(
           return { arrived: false, message: '当前配送箱没有待跑站点，快去抢单大厅接单吧！' };
         }
 
-        const startPos = { ...initialState.rider.pos };
-        const endPos = { ...nextStop.pos };
-        const rideId = `RIDE-${Math.floor(100 + Math.random() * 900)}`;
-        const stepMs = speedMode === 'turbo_sprint' ? 420 : 620;
-
-        nexusStore.patch({
-          activeModule: 'map',
-          rideSimulation: {
-            rideId,
-            status: 'riding',
-            targetTitle: nextStop.title,
-            progress: 15,
-            stageText: `[${speedMode}] 正驶向：${nextStop.title}...`,
-          },
-        });
-
-        const checkpoints = [
-          { ratio: 0.35, pct: 35, text: `沿街区干道骑行中 (${speedMode})...` },
-          { ratio: 0.7, pct: 70, text: `接近目的地「${nextStop.address}」...` },
-          { ratio: 1.0, pct: 100, text: `已抵达：${nextStop.title}！` },
-        ];
-
+        nexusStore.patch({ activeModule: 'map' });
         try {
-          for (const cp of checkpoints) {
-            await sleepWithAbort(stepMs, execSignal);
-            const curX = Math.round(startPos.x + (endPos.x - startPos.x) * cp.ratio);
-            const curY = Math.round(startPos.y + (endPos.y - startPos.y) * cp.ratio);
-            nexusStore.update((prev) => ({
-              ...prev,
-              rider: { ...prev.rider, pos: { x: curX, y: curY } },
-              rideSimulation: {
-                ...prev.rideSimulation,
-                progress: cp.pct,
-                stageText: cp.text,
-              },
-            }));
-          }
-
-          // Restore startPos momentarily so applyTravelPhysics calculates full segment hazard intersection accurately
-          nexusStore.update((prev) => ({
-            ...prev,
-            rider: { ...prev.rider, pos: startPos },
-          }));
-          const travel = applyTravelPhysics(endPos, nextStop.address, speedMode);
+          const travel = await animateAndApplyTravel({
+            destPos: nextStop.pos,
+            destLabel: nextStop.address,
+            pace: speedMode,
+            routeChoice,
+            actionSummaryPrefix: nextStop.action === 'pickup' ? '驶向商家' : '驶向顾客',
+            signal: execSignal,
+          });
 
           nexusStore.update((prev) => ({
             ...prev,
@@ -1348,18 +1542,14 @@ export async function registerNavigationTools(
                 ? { ...o, stage: 'at_store' }
                 : o,
             ),
-            rideSimulation: {
-              ...prev.rideSimulation,
-              status: 'arrived',
-              progress: 100,
-              stageText: `已抵达「${nextStop.title}」(耗时 ${travel.travelMinutes} 分钟，耗电 ${travel.batteryUsed}%)`,
-            },
           }));
           nexusStore.recomputeRoute();
 
           return {
             arrived: true,
             stopCompleted: nextStop.title,
+            routeChoice,
+            distanceKm: travel.distanceKm,
             travelMinutes: travel.travelMinutes,
             hazardsCrossed: travel.hazardsCrossed,
             damagedOrderIds: travel.damagedOrderIds,

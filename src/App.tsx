@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Award,
   BatteryCharging,
   Bike,
   BookOpen,
@@ -15,12 +16,14 @@ import {
   Share2,
   ShieldCheck,
   ShoppingBag,
+  Target,
   Trophy,
   Wallet,
 } from 'lucide-react';
 import { ApprovalGateModal } from './components/ApprovalGateModal';
 import { CityMapModule } from './components/CityMapModule';
 import { DeclarativeFormsModule } from './components/DeclarativeFormsModule';
+import { LiveRiderRadarBar } from './components/LiveRiderRadarBar';
 import { RiderDispatchModule } from './components/RiderDispatchModule';
 import { SpecGuideModule } from './components/SpecGuideModule';
 import { WebMCPConsoleDock } from './components/WebMCPConsoleDock';
@@ -52,12 +55,14 @@ const NAV_TABS: Array<{
 export const App: React.FC = () => {
   const { tools, runtimeMode, refreshTools } = useWebMCPBridge();
   const [openDualModalTick, setOpenDualModalTick] = useState(0);
+  const [openLeaderboardTick, setOpenLeaderboardTick] = useState(0);
   const [shareCopied, setShareCopied] = useState(false);
   const [seedBannerToast, setSeedBannerToast] = useState<string | null>(null);
 
   const activeModule = useNexusStore((s) => s.activeModule);
   const toolScopeMode = useNexusStore((s) => s.toolScopeMode);
   const autoApprove = useNexusStore((s) => s.autoApproveConsequential);
+  const blindMode = useNexusStore((s) => s.benchmarkBlindMode);
   const worldMap = useNexusStore((s) => s.worldMap);
   const rider = useNexusStore((s) => s.rider);
   const shift = useNexusStore((s) => s.shift);
@@ -166,6 +171,34 @@ export const App: React.FC = () => {
             >
               <Globe2 className="h-3.5 w-3.5 text-indigo-300" />
               世界导演 &amp; 种子/模型
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                nexusStore.patch({
+                  benchmarkBlindMode: !blindMode,
+                })
+              }
+              title="硬核盲测模式：隐藏所有 Debug 作弊工具与自动排线工具，移除提示词攻略与状态透视，考验大模型真实观测与规划能力"
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 font-bold transition ${
+                blindMode
+                  ? 'border-rose-500/60 bg-rose-500/20 text-rose-200 shadow-sm shadow-rose-500/20'
+                  : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-rose-500/40 hover:text-rose-200'
+              }`}
+            >
+              <Target className="h-3.5 w-3.5 text-rose-400" />
+              {blindMode ? '硬核盲测: 开启' : '硬核盲测: 关'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setOpenLeaderboardTick((n) => n + 1)}
+              title="查看大模型六维能力雷达图与同种子评测排行榜"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-500/15 px-2.5 py-1.5 font-bold text-amber-200 hover:bg-amber-500/25"
+            >
+              <Award className="h-3.5 w-3.5 text-amber-400" />
+              评测榜单
             </button>
 
             <button
@@ -330,6 +363,9 @@ export const App: React.FC = () => {
       {/* Main Split Arena */}
       <main className="mx-auto grid w-full max-w-[1680px] flex-1 min-h-0 grid-cols-1 gap-4 px-4 py-3.5 md:grid-cols-12 md:overflow-hidden lg:px-6">
         <section className="min-w-0 min-h-0 overscroll-contain md:col-span-7 md:h-full md:overflow-y-auto md:pr-1.5 lg:col-span-8">
+          {/* Always-visible Live Rider Radar & Model Action Tracker (except when full CityMap is already open) */}
+          {activeModule !== 'map' && <LiveRiderRadarBar />}
+
           {activeModule === 'dispatch' && <RiderDispatchModule />}
           {activeModule === 'map' && <CityMapModule />}
           {activeModule === 'spec' && <SpecGuideModule />}
@@ -358,6 +394,7 @@ export const App: React.FC = () => {
             runtimeMode={runtimeMode}
             onRefreshTools={refreshTools}
             externalOpenDualModal={openDualModalTick}
+            externalOpenLeaderboard={openLeaderboardTick}
           />
         </section>
       </main>

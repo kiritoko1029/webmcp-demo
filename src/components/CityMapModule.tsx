@@ -3,13 +3,16 @@ import {
   AlertTriangle,
   BatteryCharging,
   CloudRain,
+  Footprints,
   Navigation,
   OctagonX,
   Play,
   Route,
   Sun,
+  Target,
 } from 'lucide-react';
 import { useNexusStore } from '../store/nexusStore';
+import type { RouteChoice } from '../types/domain';
 import { executeWebMCPByName } from '../webmcp/useWebMCPBridge';
 
 export const CityMapModule: React.FC = () => {
@@ -18,10 +21,14 @@ export const CityMapModule: React.FC = () => {
   const orders = useNexusStore((s) => s.orders);
   const stops = useNexusStore((s) => s.plannedStops);
   const sim = useNexusStore((s) => s.rideSimulation);
+  const trail = useNexusStore((s) => s.riderTrail);
+  const activeBubble = useNexusStore((s) => s.activeRiderBubble);
+  const blindMode = useNexusStore((s) => s.benchmarkBlindMode);
 
   const [speedMode, setSpeedMode] = useState<'careful_steady' | 'normal_cruise' | 'turbo_sprint'>(
     'normal_cruise',
   );
+  const [routeChoice, setRouteChoice] = useState<RouteChoice>('shortest_direct');
   const rideAbortRef = useRef<AbortController | null>(null);
 
   const activeOrders = orders.filter(
@@ -36,7 +43,7 @@ export const CityMapModule: React.FC = () => {
     try {
       await executeWebMCPByName(
         'navigation.ride_to_next_stop',
-        { speedMode },
+        { speedMode, routeChoice },
         { signal: ac.signal, callerLabel: 'CityMapUI' },
       );
     } catch {
@@ -82,55 +89,81 @@ export const CityMapModule: React.FC = () => {
               <option value="turbo_sprint">狂飙冲刺档 (省时30%·高耗电颠簸)</option>
             </select>
 
-            <button
-              type="button"
-              onClick={() =>
-                void executeWebMCPByName(
-                  'debug.toggle_heavy_rain',
-                  { heavyRain: rider.weather !== 'heavy_rain' },
-                  { callerLabel: 'CityMapUI' },
-                )
-              }
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
-                rider.weather === 'heavy_rain'
-                  ? 'border-sky-400/60 bg-sky-500/20 text-sky-200'
-                  : 'border-slate-700 bg-slate-950 text-slate-300'
-              }`}
+            <select
+              value={routeChoice}
+              onChange={(e) => setRouteChoice(e.target.value as RouteChoice)}
+              className="rounded-lg border border-emerald-500/40 bg-slate-950 px-2.5 py-1.5 text-xs text-emerald-200"
             >
-              {rider.weather === 'heavy_rain' ? (
-                <>
-                  <CloudRain className="h-3.5 w-3.5 text-sky-300" />
-                  暴雨+¥4
-                </>
-              ) : (
-                <>
-                  <Sun className="h-3.5 w-3.5 text-amber-300" />
-                  晴天
-                </>
-              )}
-            </button>
+              <option value="shortest_direct">路线：直线抄近道 (经过危险区受罚)</option>
+              <option value="detour_safe_road">路线：安全主干道绕行 (+36%路程·0风险)</option>
+            </select>
 
-            <button
-              type="button"
-              onClick={() =>
-                void executeWebMCPByName('debug.swap_ebike_battery', {}, { callerLabel: 'CityMapUI' })
-              }
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-sky-300 hover:border-sky-500/50"
-            >
-              <BatteryCharging className="h-3.5 w-3.5" />
-              ¥3 换电
-            </button>
+            {blindMode ? (
+              <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 text-xs font-semibold text-rose-200">
+                <Target className="h-3.5 w-3.5 text-rose-400" />
+                硬核盲测已禁用 Debug/排线辅助
+              </span>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void executeWebMCPByName(
+                      'debug.toggle_heavy_rain',
+                      { heavyRain: rider.weather !== 'heavy_rain' },
+                      { callerLabel: 'CityMapUI' },
+                    )
+                  }
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
+                    rider.weather === 'heavy_rain'
+                      ? 'border-sky-400/60 bg-sky-500/20 text-sky-200'
+                      : 'border-slate-700 bg-slate-950 text-slate-300'
+                  }`}
+                >
+                  {rider.weather === 'heavy_rain' ? (
+                    <>
+                      <CloudRain className="h-3.5 w-3.5 text-sky-300" />
+                      暴雨+¥4
+                    </>
+                  ) : (
+                    <>
+                      <Sun className="h-3.5 w-3.5 text-amber-300" />
+                      晴天
+                    </>
+                  )}
+                </button>
 
-            <button
-              type="button"
-              onClick={() =>
-                void executeWebMCPByName('navigation.plan_optimal_route', {}, { callerLabel: 'CityMapUI' })
-              }
-              className="inline-flex items-center gap-1 rounded-lg bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
-            >
-              <Route className="h-3.5 w-3.5 text-amber-400" />
-              重排路线
-            </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void executeWebMCPByName(
+                      'rider.upgrade_or_resupply',
+                      { item: 'swap_battery' },
+                      { callerLabel: 'CityMapUI' },
+                    )
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-sky-300 hover:border-sky-500/50"
+                >
+                  <BatteryCharging className="h-3.5 w-3.5" />
+                  ¥3 换电
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    void executeWebMCPByName(
+                      'navigation.plan_optimal_route',
+                      {},
+                      { callerLabel: 'CityMapUI' },
+                    )
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+                >
+                  <Route className="h-3.5 w-3.5 text-amber-400" />
+                  重排路线
+                </button>
+              </>
+            )}
 
             {sim.status === 'riding' ? (
               <button
@@ -257,20 +290,53 @@ export const CityMapModule: React.FC = () => {
             );
           })}
 
-          {/* Planned Multi-Stop Route Polyline */}
-          {stops.length > 0 && (
+          {/* Safe Perimeter Detour Corridors */}
+          <g stroke="rgba(16, 185, 129, 0.2)" strokeWidth="5" strokeDasharray="7 6" fill="none">
+            <line x1="80" y1="86" x2="860" y2="86" />
+            <line x1="80" y1="342" x2="860" y2="342" />
+          </g>
+          <text x="86" y="79" fill="rgba(16, 185, 129, 0.65)" fontSize="9.5" fontWeight="600">
+            北环无颠簸安全绕行走廊 (detour_safe_road)
+          </text>
+
+          {/* Executed Rider Movement Trail History */}
+          {trail.slice(-8).map((hop, idx, arr) => {
+            const isLatest = idx === arr.length - 1;
+            const pts = hop.waypoints.map((p) => `${p.x},${p.y}`).join(' ');
+            const color =
+              hop.routeChoice === 'detour_safe_road'
+                ? '#10b981'
+                : hop.hazardsHit.length > 0
+                  ? '#f43f5e'
+                  : '#38bdf8';
+            return (
+              <g key={hop.id} opacity={isLatest ? 0.95 : 0.45}>
+                <polyline
+                  points={pts}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={isLatest ? 3.5 : 2}
+                  strokeDasharray={hop.routeChoice === 'detour_safe_road' ? undefined : '6 4'}
+                />
+                <circle cx={hop.fromPos.x} cy={hop.fromPos.y} r={3.5} fill={color} />
+              </g>
+            );
+          })}
+
+          {/* Planned Multi-Stop Route Polyline (hidden in blind benchmark mode so no visual spoilers!) */}
+          {!blindMode && stops.length > 0 && (
             <>
               <polyline
                 points={polylinePoints}
                 fill="none"
-                stroke="rgba(251, 191, 36, 0.22)"
-                strokeWidth="6"
+                stroke="rgba(251, 191, 36, 0.18)"
+                strokeWidth="5"
               />
               <polyline
                 points={polylinePoints}
                 fill="none"
                 stroke="#fbbf24"
-                strokeWidth="2.5"
+                strokeWidth="2"
                 className="animate-route-dash"
               />
             </>
@@ -343,22 +409,29 @@ export const CityMapModule: React.FC = () => {
           {/* Rider Electric Scooter Marker */}
           <g
             transform={`translate(${rider.pos.x}, ${rider.pos.y})`}
-            style={{ transition: 'transform 0.45s ease-out' }}
+            style={{ transition: 'transform 0.14s linear' }}
           >
             <circle r={18} fill="rgba(99, 102, 241, 0.28)" className="animate-pulse-ring" />
             <circle r={10.5} fill="#6366f1" stroke="#ffffff" strokeWidth={2.5} />
             <rect
-              x={-64}
-              y={-35}
-              width={128}
-              height={20}
+              x={-88}
+              y={rider.pos.y < 70 ? 15 : -36}
+              width={176}
+              height={21}
               rx={6}
-              fill="#4f46e5"
-              stroke="#c7d2fe"
-              strokeWidth={1}
+              fill="#312e81"
+              stroke="#a5b4fc"
+              strokeWidth={1.2}
             />
-            <text x={0} y={-21} textAnchor="middle" fill="#ffffff" fontSize="9.5" fontWeight="700">
-              {rider.name} · 电{rider.batteryPct}% 体{rider.staminaPct}%
+            <text
+              x={0}
+              y={rider.pos.y < 70 ? 29 : -22}
+              textAnchor="middle"
+              fill="#ffffff"
+              fontSize="9.5"
+              fontWeight="700"
+            >
+              {(activeBubble || `${rider.name} · 电${rider.batteryPct}% 体${rider.staminaPct}%`).slice(0, 22)}
             </text>
           </g>
         </svg>
@@ -378,6 +451,43 @@ export const CityMapModule: React.FC = () => {
             </div>
           ))}
         </div>
+
+        {/* Recent Rider Movement Hop Log */}
+        {trail.length > 0 && (
+          <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/90 p-3 text-xs">
+            <div className="mb-2 flex items-center gap-1.5 font-bold text-indigo-300">
+              <Footprints className="h-3.5 w-3.5" />
+              骑手已执行移动轨迹明细（共 {trail.length} 段行程）
+            </div>
+            <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+              {trail
+                .slice()
+                .reverse()
+                .slice(0, 6)
+                .map((hop) => (
+                  <div
+                    key={hop.id}
+                    className="flex flex-wrap items-center justify-between gap-1.5 rounded border border-slate-800 bg-slate-900/70 px-2.5 py-1.5 text-[11px]"
+                  >
+                    <span className="text-slate-200">
+                      <strong className="font-mono text-amber-300">[{hop.gameTimeLabel}]</strong>{' '}
+                      {hop.fromLabel.slice(0, 8)} → <strong>{hop.toLabel.slice(0, 10)}</strong>
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-400">
+                      {hop.routeChoice === 'detour_safe_road' ? (
+                        <span className="text-emerald-300">安全绕行</span>
+                      ) : hop.hazardsHit.length > 0 ? (
+                        <span className="text-rose-300">闯危险区</span>
+                      ) : (
+                        <span className="text-sky-300">直线近道</span>
+                      )}{' '}
+                      · {hop.distanceKm}km · {hop.travelMinutes}分 · -{hop.batteryUsed}%电
+                    </span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

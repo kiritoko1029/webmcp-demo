@@ -789,6 +789,20 @@ export async function generateNewWorldByDirector(
       orders: generatedOrders,
       selectedOrderId: generatedOrders[0]?.orderId ?? null,
       plannedStops: buildDefaultStops(generatedOrders, freshRider.pos),
+      riderTrail: [],
+      activeRiderBubble: `新城市 [${seedId}] 待命出发`,
+      liveActionFeed: [
+        {
+          id: `ACT-W-${Date.now()}`,
+          gameTimeLabel: '11:00',
+          wallTime: new Date().toTimeString().slice(0, 8),
+          actor: '世界导演',
+          toolName: 'world.generate',
+          category: 'observe',
+          headline: `已生成新世界「${builtMap.themeName}」(${seedId})`,
+          badges: [`${generatedOrders.length} 笔初始单`, `天气: ${initialWeather}`],
+        },
+      ],
       worldEvents: [
         {
           id: `WEV-${Date.now()}`,
@@ -868,6 +882,20 @@ export async function generateNewWorldByDirector(
     orders,
     selectedOrderId: orders[0]?.orderId ?? null,
     plannedStops: buildDefaultStops(orders, freshRider.pos),
+    riderTrail: [],
+    activeRiderBubble: `新城市 [${seedId}] 待命出发`,
+    liveActionFeed: [
+      {
+        id: `ACT-WP-${Date.now()}`,
+        gameTimeLabel: '11:00',
+        wallTime: new Date().toTimeString().slice(0, 8),
+        actor: '世界导演',
+        toolName: 'world.generate',
+        category: 'observe',
+        headline: `已生成种子世界「${finalMap.themeName}」(${seedId})`,
+        badges: [`${orders.length} 笔初始单`, `天气: ${weatherOverride}`],
+      },
+    ],
     worldEvents: [
       {
         id: `WEV-${Date.now()}`,
@@ -955,6 +983,20 @@ export async function importWorldFromSeedOrUrl(
       orders: clonedOrders,
       selectedOrderId: clonedOrders[0]?.orderId ?? null,
       plannedStops: buildDefaultStops(clonedOrders, freshRider.pos),
+      riderTrail: [],
+      activeRiderBubble: `载入分享种子 [${fullMap.seedId}]`,
+      liveActionFeed: [
+        {
+          id: `ACT-IMP-${Date.now()}`,
+          gameTimeLabel: '11:00',
+          wallTime: new Date().toTimeString().slice(0, 8),
+          actor: '系统',
+          toolName: 'seed.import',
+          category: 'observe',
+          headline: `已从共享快照载入「${fullMap.themeName}」(${fullMap.seedId})`,
+          badges: [`${clonedOrders.length} 笔初始单`],
+        },
+      ],
       issueReports: [],
       withdrawals: [],
       worldEvents: [
@@ -1045,6 +1087,20 @@ export async function importWorldFromSeedOrUrl(
     orders: seededOrders,
     selectedOrderId: seededOrders[0]?.orderId ?? null,
     plannedStops: buildDefaultStops(seededOrders, freshRider.pos),
+    riderTrail: [],
+    activeRiderBubble: `短种子 [${shortSeed}] 就绪`,
+    liveActionFeed: [
+      {
+        id: `ACT-SIMP-${Date.now()}`,
+        gameTimeLabel: '11:00',
+        wallTime: new Date().toTimeString().slice(0, 8),
+        actor: '系统',
+        toolName: 'seed.short_import',
+        category: 'observe',
+        headline: `已由短种子 [${shortSeed}] 生成「${seededMap.themeName}」`,
+        badges: [`${seededOrders.length} 笔初始单`],
+      },
+    ],
     issueReports: [],
     withdrawals: [],
     worldEvents: [

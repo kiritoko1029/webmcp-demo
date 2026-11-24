@@ -457,8 +457,9 @@ function buildRichLocalReply(toolLogs: TurnToolCallLog[]): string {
         break;
       }
       case 'orders.arrive_and_pickup': {
+        const routeNote = out.routeChoice === 'detour_safe_road' ? '安全大道绕行' : '直线抄近道';
         lines.push(
-          `- 已抵达 **${out.merchantName}** (${out.pickupSeq}) 扫码取餐（骑行 ${out.travelMinutes} 分钟，等餐 ${out.waitedKitchenMinutes} 分钟，电量 ${out.batteryPct}%）。`,
+          `- 已走**${routeNote}**抵达 **${out.merchantName}** (${out.pickupSeq}) 扫码取餐（骑行 ${out.travelMinutes} 分钟，等餐 ${out.waitedKitchenMinutes} 分钟，电量 ${out.batteryPct}%）。`,
         );
         break;
       }
@@ -473,10 +474,11 @@ function buildRichLocalReply(toolLogs: TurnToolCallLog[]): string {
         break;
       }
       case 'orders.complete_delivery': {
+        const routeNote = out.routeChoice === 'detour_safe_road' ? '安全大道绕行' : '直线抄近道';
         const tipPart = Number(out.tipEarnedYuan) > 0 ? `（含完好准时打赏 +¥${out.tipEarnedYuan}）` : '';
         const questPart = Number(out.questBonusYuan) > 0 ? `，并触发冲单大奖 +¥${out.questBonusYuan}！` : '';
         lines.push(
-          `- 订单 ${out.orderId} 妥投结算！完好度 ${out.mealIntegrityPct}%，净入账 +¥${Number(out.earnedYuan).toFixed(2)}${tipPart}，**${out.comboStreak} 连击**，总分升至 **${out.arenaScore} 分**（钱包 ¥${Number(out.newWalletYuan).toFixed(2)}）${questPart}`,
+          `- 订单 ${out.orderId} 经**${routeNote}**妥投结算！完好度 ${out.mealIntegrityPct}%，净入账 +¥${Number(out.earnedYuan).toFixed(2)}${tipPart}，**${out.comboStreak} 连击**，总分升至 **${out.arenaScore} 分**（钱包 ¥${Number(out.newWalletYuan).toFixed(2)}）${questPart}`,
         );
         break;
       }
@@ -598,6 +600,10 @@ export async function runAutonomousArenaRound(
         why: '写字楼外卖柜订单先跨帧存柜获取取件码',
       });
     }
+    const needsSafeDetour =
+      (target.fragileTag === 'cream_cake' || target.fragileTag === 'hot_soup') &&
+      !s.rider.upgrades.shockAbsorber &&
+      target.minutesLeft >= 14;
     const safePace =
       target.fragileTag === 'cream_cake' ||
       (target.fragileTag === 'hot_soup' && !s.rider.upgrades.shockAbsorber)
@@ -607,8 +613,13 @@ export async function runAutonomousArenaRound(
           : 'normal_cruise';
     planned.push({
       toolName: 'orders.complete_delivery',
-      input: { orderId: target.orderId, pace: safePace, proofNote: 'AI 策略骑手自动妥投' },
-      why: `按餐品特性选择 ${safePace} 档位送达结算出账`,
+      input: {
+        orderId: target.orderId,
+        pace: safePace,
+        routeChoice: needsSafeDetour ? 'detour_safe_road' : 'shortest_direct',
+        proofNote: 'AI 策略骑手自动妥投',
+      },
+      why: `按餐品特性选择 ${safePace} 档位与 ${needsSafeDetour ? '安全大道绕行' : '直线抄近道'} 送达结算出账`,
     });
   } else if (waitingPickup.length > 0) {
     const target = waitingPickup[0];

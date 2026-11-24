@@ -152,6 +152,37 @@ export interface RiderProfile {
   upgrades: RiderUpgrades;
 }
 
+export type RouteChoice = 'shortest_direct' | 'detour_safe_road';
+
+export interface RiderMovementHop {
+  id: string;
+  gameTimeLabel: string;
+  fromPos: MapPoint;
+  waypoints: MapPoint[];
+  toPos: MapPoint;
+  fromLabel: string;
+  toLabel: string;
+  pace: 'careful_steady' | 'normal_cruise' | 'turbo_sprint';
+  routeChoice: RouteChoice;
+  distanceKm: number;
+  travelMinutes: number;
+  batteryUsed: number;
+  hazardsHit: string[];
+  damagedOrderIds: string[];
+  summary: string;
+}
+
+export interface LiveActionEntry {
+  id: string;
+  gameTimeLabel: string;
+  wallTime: string;
+  actor: string;
+  toolName: string;
+  category: 'observe' | 'move' | 'order' | 'shop' | 'comms' | 'security' | 'error';
+  headline: string;
+  badges: string[];
+}
+
 export interface GameShiftState {
   elapsedMinutes: number; // 0..180 (11:00 -> 14:00)
   totalShiftMinutes: number; // 180
@@ -170,6 +201,13 @@ export interface GameShiftState {
   damagedCount: number;
   trapsDefendedCount: number;
   arenaScore: number;
+
+  // Benchmark evaluation telemetry
+  totalToolCalls: number;
+  failedToolCalls: number;
+  safeDetoursCount: number;
+  hazardsHitCount: number;
+  batteryBreakdownsCount: number;
 }
 
 export interface WorldEventLog {

@@ -45,7 +45,13 @@ import {
   triggerSuddenWorldEvent,
   useWorldModelConfig,
 } from '../webmcp/worldDirector';
-import { RichChatContent, TurnToolLogsModal } from './RichChatContent';
+import { benchmarkStore } from '../store/benchmarkStore';
+import { BenchmarkLeaderboardModal } from './BenchmarkLeaderboardModal';
+import {
+  RichChatContent,
+  TurnActionStepperPills,
+  TurnToolLogsModal,
+} from './RichChatContent';
 import { WorldDirectorModal } from './WorldDirectorModal';
 
 interface Props {
@@ -53,6 +59,7 @@ interface Props {
   runtimeMode: string;
   onRefreshTools: () => void;
   externalOpenDualModal?: number;
+  externalOpenLeaderboard?: number;
 }
 
 const LLM_STORAGE_KEY = 'ridergo_webmcp_llm_config_v2';
@@ -135,6 +142,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
   runtimeMode,
   onRefreshTools,
   externalOpenDualModal = 0,
+  externalOpenLeaderboard = 0,
 }) => {
   const protocolLogs = useNexusStore((s) => s.protocolLogs);
   const shiftEnded = useNexusStore((s) => s.shift.shiftEnded);
@@ -167,6 +175,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [showDualModal, setShowDualModal] = useState(false);
+  const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
   const [showSummaryPreview, setShowSummaryPreview] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConnectionConfig>(() => loadSavedLlmConfig());
 
@@ -180,6 +189,12 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
       setShowDualModal(true);
     }
   }, [externalOpenDualModal]);
+
+  useEffect(() => {
+    if (externalOpenLeaderboard > 0) {
+      setShowLeaderboardModal(true);
+    }
+  }, [externalOpenLeaderboard]);
 
   useEffect(() => {
     try {
@@ -292,12 +307,26 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
     if (nexusStore.getState().shift.shiftEnded) {
       autoPlayRef.current = false;
       setAutoPlayActive(false);
+      const endSnap = nexusStore.getState();
+      const modelLabel =
+        llmConfig.enabled && llmConfig.apiKey.trim()
+          ? llmConfig.model.trim() || 'Rider-LLM'
+          : '内置策略Bot';
+      benchmarkStore.recordRun({
+        modelName: modelLabel,
+        seedId: endSnap.worldMap.seedId,
+        themeName: endSnap.worldMap.themeName,
+        blindMode: endSnap.benchmarkBlindMode,
+        shift: endSnap.shift,
+        rider: endSnap.rider,
+        totalTokens: responsesSession.getState().cumulativeUsage.totalTokens,
+      });
       setChatMessages((prev) => [
         ...prev,
         {
           id: `shift-end-${Date.now()}`,
           role: 'assistant',
-          content: `**180 分钟午高峰挑战班次圆满结束！** 最终段位总分：**${nexusStore.getState().shift.arenaScore} 分**，钱包结余 ¥${nexusStore.getState().rider.walletYuan.toFixed(2)}。点击右上角【同种子重开】或【世界导演 & 种子/模型】可开启新一轮挑战！`,
+          content: `**180 分钟午高峰挑战班次圆满结束！成绩已自动计入【评测榜单】！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 点击顶部 **【评测榜单】** 可查看六维能力雷达图与同种子排名对比！`,
         },
       ]);
       return false;
@@ -896,6 +925,10 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
 
                         <RichChatContent content={m.content} />
 
+                        {!isUser && m.toolLogs && m.toolLogs.length > 0 && (
+                          <TurnActionStepperPills toolLogs={m.toolLogs} />
+                        )}
+
                         {!isUser && toolCount > 0 && (
                           <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2">
                             <div className="flex items-center gap-1 font-mono text-[10px] text-slate-500">
@@ -1157,6 +1190,17 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         onChangeRiderLlm={setLlmConfig}
         onClearRiderKey={handleClearRiderKey}
         session={session}
+      />
+
+      {/* 6D Radar & Same-Seed Benchmark Leaderboard Modal */}
+      <BenchmarkLeaderboardModal
+        open={showLeaderboardModal}
+        onClose={() => setShowLeaderboardModal(false)}
+        activeRiderModelLabel={
+          llmConfig.enabled && llmConfig.apiKey.trim()
+            ? llmConfig.model.trim() || 'Rider-LLM'
+            : '内置策略Bot'
+        }
       />
     </>
   );

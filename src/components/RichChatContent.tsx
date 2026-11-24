@@ -143,6 +143,148 @@ export const RichChatContent: React.FC<{ content: string }> = ({ content }) => {
   );
 };
 
+function describeToolStepChip(log: TurnToolCallLog): { icon: string; text: string; tone: string } {
+  const out = (log.output && typeof log.output === 'object' ? log.output : {}) as Record<
+    string,
+    unknown
+  >;
+  if (log.status === 'error') {
+    return {
+      icon: '⚠️',
+      text: `${log.toolName.split('.').pop()} 受阻`,
+      tone: 'border-rose-500/40 bg-rose-500/15 text-rose-200',
+    };
+  }
+
+  switch (log.toolName) {
+    case 'rider.get_shift_summary':
+      return {
+        icon: '🔍',
+        text: '扫描全局态势雷达',
+        tone: 'border-slate-700 bg-slate-900 text-slate-200',
+      };
+    case 'orders.list_nearby_pool':
+      return {
+        icon: '📋',
+        text: `查看大厅 (${out.poolCount ?? 0}单)`,
+        tone: 'border-slate-700 bg-slate-900 text-slate-200',
+      };
+    case 'orders.grab_order':
+      return {
+        icon: '📦',
+        text: `抢单 ${out.orderId ?? log.input.orderId ?? ''}`,
+        tone: 'border-sky-500/40 bg-sky-500/15 text-sky-200',
+      };
+    case 'rider.upgrade_or_resupply': {
+      const item = String(log.input.item ?? '');
+      const label =
+        item === 'swap_battery'
+          ? '¥3满血换电'
+          : item === 'energy_drink'
+            ? '¥5补体力'
+            : item === 'upgrade_shock_absorber'
+              ? '装防抖减震架'
+              : item === 'upgrade_expanded_box'
+                ? '装7格扩容箱'
+                : '升级长续航包';
+      return {
+        icon: '🛠️',
+        text: label,
+        tone: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200',
+      };
+    }
+    case 'orders.arrive_and_pickup': {
+      const detour = out.routeChoice === 'detour_safe_road' ? '绕行' : '直达';
+      return {
+        icon: '🛵',
+        text: `${detour}取餐 ${out.pickupSeq ?? log.input.orderId ?? ''} (${out.travelMinutes ?? 0}分)`,
+        tone: 'border-amber-500/40 bg-amber-500/15 text-amber-200',
+      };
+    }
+    case 'orders.complete_delivery': {
+      const detour = out.routeChoice === 'detour_safe_road' ? '绕行' : '直达';
+      return {
+        icon: '✅',
+        text: `${detour}送达 ${out.orderId ?? ''} (+¥${Number(out.earnedYuan ?? 0).toFixed(1)})`,
+        tone: 'border-emerald-500/45 bg-emerald-500/20 text-emerald-200',
+      };
+    }
+    case 'orders.negotiate_with_npc':
+      return {
+        icon: '💬',
+        text: `沟通${log.input.targetRole === 'customer' ? '顾客' : '店长'} (${log.input.orderId ?? ''})`,
+        tone: 'border-indigo-500/40 bg-indigo-500/15 text-indigo-200',
+      };
+    case 'comms.store_meal_in_locker':
+      return {
+        icon: '📮',
+        text: `跨帧存外卖柜 (${out.boxNo ?? ''})`,
+        tone: 'border-purple-500/40 bg-purple-500/15 text-purple-200',
+      };
+    case 'comms.send_customer_message':
+      return {
+        icon: '📱',
+        text: `95013发取餐码`,
+        tone: 'border-purple-500/40 bg-purple-500/15 text-purple-200',
+      };
+    case 'orders.read_customer_remark':
+      return {
+        icon: '🛡️',
+        text: out.suspiciousPromptInjectionDetected ? '识破注入陷阱(+60分)' : '审查备注',
+        tone: 'border-fuchsia-500/40 bg-fuchsia-500/15 text-fuchsia-200',
+      };
+    case 'declarative.report_delivery_issue':
+      return {
+        icon: '📄',
+        text: `<form>免责加时`,
+        tone: 'border-cyan-500/40 bg-cyan-500/15 text-cyan-200',
+      };
+    default:
+      return {
+        icon: '⚡',
+        text: log.toolName.split('.').pop() ?? log.toolName,
+        tone: 'border-slate-700 bg-slate-900 text-slate-200',
+      };
+  }
+}
+
+/**
+ * Compact visual action chain shown directly inside each AI turn message card
+ * so the user immediately sees the exact sequence of actions the model performed!
+ */
+export const TurnActionStepperPills: React.FC<{ toolLogs: TurnToolCallLog[] }> = ({
+  toolLogs,
+}) => {
+  if (!toolLogs || toolLogs.length === 0) return null;
+
+  return (
+    <div className="mt-2.5 rounded-xl border border-slate-800/90 bg-slate-900/75 p-2">
+      <div className="mb-1.5 text-[10px] font-semibold text-slate-400">
+        本回合模型动作执行链（共 {toolLogs.length} 步）：
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {toolLogs.map((log, idx) => {
+          const chip = describeToolStepChip(log);
+          return (
+            <React.Fragment key={log.id}>
+              <span
+                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] font-medium ${chip.tone}`}
+              >
+                <span className="font-mono text-[10px] opacity-75">{idx + 1}.</span>
+                <span>{chip.icon}</span>
+                <span>{chip.text}</span>
+              </span>
+              {idx < toolLogs.length - 1 && (
+                <span className="font-mono text-[10px] text-slate-600">→</span>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 interface ModalProps {
   open: boolean;
   onClose: () => void;

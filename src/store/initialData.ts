@@ -218,6 +218,12 @@ export function createInitialShift(): GameShiftState {
     damagedCount: 0,
     trapsDefendedCount: 0,
     arenaScore: 260,
+
+    totalToolCalls: 0,
+    failedToolCalls: 0,
+    safeDetoursCount: 0,
+    hazardsHitCount: 0,
+    batteryBreakdownsCount: 0,
   };
 }
 

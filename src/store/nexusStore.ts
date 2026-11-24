@@ -5,8 +5,10 @@ import type {
   DeliveryOrder,
   FoodCategory,
   GameShiftState,
+  LiveActionEntry,
   PendingApprovalRequest,
   ProtocolEventLog,
+  RiderMovementHop,
   RideSimulationState,
   RiderProfile,
   RouteStop,
@@ -32,6 +34,8 @@ export interface NexusState {
   toolScopeMode: ToolScopeMode;
   autoApproveConsequential: boolean;
   includePromptInjectionSample: boolean;
+  /** Hardcore LLM Benchmark Mode: hides debug/route-helper tools & strips prompt hints/god-view */
+  benchmarkBlindMode: boolean;
 
   worldMap: WorldMapConfig;
   shift: GameShiftState;
@@ -48,6 +52,13 @@ export interface NexusState {
 
   plannedStops: RouteStop[];
   rideSimulation: RideSimulationState;
+
+  /** Visual trail of recent rider movements on the city map */
+  riderTrail: RiderMovementHop[];
+  /** Human-readable chronological feed of AI/rider actions & state deltas */
+  liveActionFeed: LiveActionEntry[];
+  /** Floating speech/action bubble shown above the rider scooter on map */
+  activeRiderBubble: string | null;
 
   issueReports: DeliveryIssueReport[];
   withdrawals: WithdrawalRecord[];
@@ -146,6 +157,7 @@ type PersistedSlice = Pick<
   | 'toolScopeMode'
   | 'autoApproveConsequential'
   | 'includePromptInjectionSample'
+  | 'benchmarkBlindMode'
   | 'worldMap'
   | 'shift'
   | 'worldEvents'
@@ -153,6 +165,8 @@ type PersistedSlice = Pick<
   | 'orders'
   | 'selectedOrderId'
   | 'poolFilter'
+  | 'riderTrail'
+  | 'liveActionFeed'
   | 'issueReports'
   | 'withdrawals'
 >;
@@ -171,6 +185,7 @@ function createFreshDefaultState(): NexusState {
     toolScopeMode: 'global',
     autoApproveConsequential: false,
     includePromptInjectionSample: true,
+    benchmarkBlindMode: false,
 
     worldMap,
     shift: createInitialShift(),
@@ -193,6 +208,21 @@ function createFreshDefaultState(): NexusState {
       progress: 0,
       stageText: '等待出击：可让外卖员大模型自动托管闯关，或手动点击移动与抢单',
     },
+
+    riderTrail: [],
+    liveActionFeed: [
+      {
+        id: 'ACT-INIT',
+        gameTimeLabel: '11:00',
+        wallTime: new Date().toTimeString().slice(0, 8),
+        actor: '系统',
+        toolName: 'init',
+        category: 'observe',
+        headline: '午高峰 180 分钟挑战开局：骑手王闪电已在国贸 SOHO 待命',
+        badges: ['电量 68%', '体力 86%', '箱容 3/4格', '钱包 ¥42.00'],
+      },
+    ],
+    activeRiderBubble: '待命中 · 等待指令出发',
 
     issueReports: [...INITIAL_ISSUE_REPORTS],
     withdrawals: [...INITIAL_WITHDRAWALS],
@@ -233,6 +263,7 @@ function loadHydratedState(): NexusState {
         saved.autoApproveConsequential ?? fresh.autoApproveConsequential,
       includePromptInjectionSample:
         saved.includePromptInjectionSample ?? fresh.includePromptInjectionSample,
+      benchmarkBlindMode: saved.benchmarkBlindMode ?? fresh.benchmarkBlindMode,
       worldMap: saved.worldMap,
       shift: { ...fresh.shift, ...saved.shift },
       worldEvents: Array.isArray(saved.worldEvents) ? saved.worldEvents : fresh.worldEvents,
@@ -241,6 +272,10 @@ function loadHydratedState(): NexusState {
       selectedOrderId: saved.selectedOrderId ?? fresh.selectedOrderId,
       poolFilter: saved.poolFilter ?? fresh.poolFilter,
       plannedStops: buildDefaultStops(orders, rider.pos),
+      riderTrail: Array.isArray(saved.riderTrail) ? saved.riderTrail : fresh.riderTrail,
+      liveActionFeed: Array.isArray(saved.liveActionFeed)
+        ? saved.liveActionFeed
+        : fresh.liveActionFeed,
       issueReports: Array.isArray(saved.issueReports) ? saved.issueReports : fresh.issueReports,
       withdrawals: Array.isArray(saved.withdrawals) ? saved.withdrawals : fresh.withdrawals,
     };
@@ -257,6 +292,7 @@ function persistSlice(s: NexusState) {
       toolScopeMode: s.toolScopeMode,
       autoApproveConsequential: s.autoApproveConsequential,
       includePromptInjectionSample: s.includePromptInjectionSample,
+      benchmarkBlindMode: s.benchmarkBlindMode,
       worldMap: s.worldMap,
       shift: s.shift,
       worldEvents: s.worldEvents.slice(0, 30),
@@ -264,6 +300,8 @@ function persistSlice(s: NexusState) {
       orders: s.orders,
       selectedOrderId: s.selectedOrderId,
       poolFilter: s.poolFilter,
+      riderTrail: s.riderTrail.slice(-16),
+      liveActionFeed: s.liveActionFeed.slice(0, 35),
       issueReports: s.issueReports,
       withdrawals: s.withdrawals,
     };
@@ -363,6 +401,56 @@ export const nexusStore = {
       {
         ...state,
         worldEvents: [newEv, ...state.worldEvents].slice(0, 30),
+      },
+      true,
+    );
+  },
+
+  appendRiderHop(hop: Omit<RiderMovementHop, 'id' | 'gameTimeLabel'>) {
+    const entry: RiderMovementHop = {
+      ...hop,
+      id: `HOP-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      gameTimeLabel: formatShiftClock(state.shift.elapsedMinutes),
+    };
+    commitState(
+      {
+        ...state,
+        riderTrail: [...state.riderTrail, entry].slice(-14),
+        activeRiderBubble: hop.summary,
+      },
+      true,
+    );
+  },
+
+  appendLiveAction(
+    action: Omit<LiveActionEntry, 'id' | 'gameTimeLabel' | 'wallTime'>,
+    bubbleText?: string,
+  ) {
+    const entry: LiveActionEntry = {
+      ...action,
+      id: `ACT-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      gameTimeLabel: formatShiftClock(state.shift.elapsedMinutes),
+      wallTime: new Date().toTimeString().slice(0, 8),
+    };
+    commitState(
+      {
+        ...state,
+        liveActionFeed: [entry, ...state.liveActionFeed].slice(0, 35),
+        ...(bubbleText !== undefined ? { activeRiderBubble: bubbleText } : {}),
+      },
+      true,
+    );
+  },
+
+  recordToolTelemetry(ok: boolean) {
+    commitState(
+      {
+        ...state,
+        shift: {
+          ...state.shift,
+          totalToolCalls: state.shift.totalToolCalls + 1,
+          failedToolCalls: state.shift.failedToolCalls + (ok ? 0 : 1),
+        },
       },
       true,
     );
@@ -504,6 +592,20 @@ export const nexusStore = {
         plannedStops: buildDefaultStops(restoredOrders, freshRider.pos),
         issueReports: [],
         withdrawals: [],
+        riderTrail: [],
+        activeRiderBubble: `同种子 [${curMap.seedId}] 11:00 重新出发`,
+        liveActionFeed: [
+          {
+            id: `ACT-REPLAY-${Date.now()}`,
+            gameTimeLabel: '11:00',
+            wallTime: new Date().toTimeString().slice(0, 8),
+            actor: '系统',
+            toolName: 'replay_seed',
+            category: 'observe',
+            headline: `已按种子 [${curMap.seedId}] 还原 11:00 初始战局，准备开始模型评测！`,
+            badges: [`${restoredOrders.length} 笔初始单`, '同起跑线对比'],
+          },
+        ],
         worldEvents: [
           {
             id: `WEV-REPLAY-${Date.now()}`,
@@ -532,9 +634,11 @@ export const nexusStore = {
       }
     }
     const logs = state.protocolLogs;
+    const keepBlindMode = state.benchmarkBlindMode;
     commitState(
       {
         ...createFreshDefaultState(),
+        benchmarkBlindMode: keepBlindMode,
         protocolLogs: logs,
       },
       true,
