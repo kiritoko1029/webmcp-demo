@@ -5,6 +5,7 @@ import {
   Check,
   Cloud,
   CloudUpload,
+  FileBarChart2,
   Filter,
   KeyRound,
   Loader2,
@@ -32,6 +33,7 @@ import {
 import { useNexusStore } from '../store/nexusStore';
 import { responsesSession } from '../webmcp/responsesSessionManager';
 import { importWorldFromSeedOrUrl } from '../webmcp/worldDirector';
+import { ShiftDiagnosticReportModal } from './ShiftDiagnosticReportModal';
 
 const RADAR_AXES: Array<{ key: keyof Omit<SixDimensionScores, 'overallAvg'>; label: string }> = [
   { key: 'profitRoi', label: '收益经营ROI' },
@@ -162,6 +164,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
   const [playerTag, setPlayerTag] = useState('');
   const [justSavedToast, setJustSavedToast] = useState<string | null>(null);
   const [challengingId, setChallengingId] = useState<string | null>(null);
+  const [inspectReportId, setInspectReportId] = useState<string | null>(null);
 
   // Admin Review & Cleanup Panel State
   const [showAdminDrawer, setShowAdminDrawer] = useState(false);
@@ -250,6 +253,7 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
       return;
     }
     const label = customModelTag.trim() || activeRiderModelLabel;
+    const usage = responsesSession.getState().cumulativeUsage;
     const saved = benchmarkStore.recordRun({
       modelName: label,
       playerTag: playerTag.trim() || undefined,
@@ -260,8 +264,10 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
       blindMode,
       shift,
       rider,
-      totalTokens,
+      totalTokens: usage.totalTokens,
+      usage,
     });
+    setInspectReportId(saved.id);
     const note = adminUnlocked
       ? `管理员直通：已将「${saved.modelName}」(${saved.arenaScore}分) 直接公开上榜！`
       : shift.elapsedMinutes >= 180 && (shift.debugToolCallsCount ?? 0) === 0
@@ -971,6 +977,18 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
                             <div className="inline-flex items-center gap-1.5">
                               <button
                                 type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setInspectReportId(rec.id);
+                                }}
+                                title="查看该模型完整六维复盘诊断报告、加扣分账本，并与其它模型逐项硬数据横评！"
+                                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-amber-500/45 bg-amber-500/15 px-2 py-1 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/30"
+                              >
+                                <FileBarChart2 className="h-3 w-3 text-amber-300" />
+                                复盘对比
+                              </button>
+                              <button
+                                type="button"
                                 disabled={challengingId === rec.id}
                                 onClick={(e) => void handleChallengeSameWorld(rec, e)}
                                 title="一键载入同款地图、订单与局中事件种子，用你的模型同场对决！"
@@ -1016,6 +1034,14 @@ export const BenchmarkLeaderboardModal: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      <ShiftDiagnosticReportModal
+        recordId={inspectReportId}
+        initialCompareId={
+          compareRecord && compareRecord.id !== inspectReportId ? compareRecord.id : null
+        }
+        onClose={() => setInspectReportId(null)}
+      />
     </div>
   );
 };

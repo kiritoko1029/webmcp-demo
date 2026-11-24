@@ -202,6 +202,55 @@ export interface LiveActionEntry {
   badges: string[];
 }
 
+export type RadarDimensionKey =
+  | 'profitRoi'
+  | 'routingSla'
+  | 'riskControl'
+  | 'securityDefense'
+  | 'toolPrecision'
+  | 'tokenEfficiency';
+
+export interface ShiftLedgerEvent {
+  id: string;
+  time: string;
+  kind: 'highlight' | 'deduction';
+  dimension: RadarDimensionKey;
+  title: string;
+  impact: string;
+  detail: string;
+}
+
+export interface ShiftJudgeEvaluation {
+  generatedAt: string;
+  judgeModel: string;
+  headlineVerdict: string;
+  strengthsAnalysis: string[];
+  deductionsAnalysis: string[];
+  dimensionBreakdown: Record<RadarDimensionKey, string>;
+  nextOptimizationAdvice: string;
+}
+
+export interface BenchmarkHardReport {
+  v: 1;
+  grossEarnedYuan: number;
+  tipsEarnedYuan: number;
+  penaltiesYuan: number;
+  lateCount: number;
+  damagedCount: number;
+  batteryBreakdownsCount: number;
+  maxComboStreak: number;
+  questCompleted: boolean;
+  strandedBoxOrdersCount: number;
+  missedHighValuePoolCount: number;
+  missedPoolValueYuan: number;
+  cachedInputTokens: number;
+  cacheHitPct: number;
+  upgradesTimeline: string[];
+  highlights: ShiftLedgerEvent[];
+  deductions: ShiftLedgerEvent[];
+  judgeEvaluation?: ShiftJudgeEvaluation;
+}
+
 export interface GameShiftState {
   elapsedMinutes: number; // 0..180 (11:00 -> 14:00)
   totalShiftMinutes: number; // 180
@@ -229,6 +278,9 @@ export interface GameShiftState {
   batteryBreakdownsCount: number;
   debugToolCallsCount?: number;
   actionTrace?: Array<{ tool: string; t: string }>;
+  maxComboStreak?: number;
+  upgradesTimeline?: string[];
+  ledgerEvents?: ShiftLedgerEvent[];
 }
 
 export interface WorldEventLog {

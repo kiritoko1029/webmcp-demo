@@ -229,6 +229,9 @@ export function createInitialShift(): GameShiftState {
     batteryBreakdownsCount: 0,
     debugToolCallsCount: 0,
     actionTrace: [],
+    maxComboStreak: 1,
+    upgradesTimeline: [],
+    ledgerEvents: [],
   };
 }
 

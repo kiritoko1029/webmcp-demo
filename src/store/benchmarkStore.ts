@@ -1,5 +1,17 @@
 import { useSyncExternalStore } from 'react';
-import type { DeliveryOrder, GameShiftState, RiderProfile, WorldMapConfig } from '../types/domain';
+import type {
+  BenchmarkHardReport,
+  DeliveryOrder,
+  GameShiftState,
+  RiderProfile,
+  WorldMapConfig,
+} from '../types/domain';
+import type { ResponseUsageMetrics } from '../webmcp/responsesSessionManager';
+import {
+  buildHardTelemetryReport,
+  generateWorldModelJudgeEvaluation,
+} from '../webmcp/shiftReportAnalyzer';
+import { worldModelStore } from '../webmcp/worldDirector';
 import { encodeWorldToShareSeed } from '../webmcp/worldSeedCodec';
 import { nexusStore } from './nexusStore';
 
@@ -37,6 +49,8 @@ export interface BenchmarkRunRecord {
   actionTrace?: Array<{ tool: string; t: string }>;
   totalTokens: number;
   radar: SixDimensionScores;
+  runReport?: BenchmarkHardReport;
+  reportUpdateToken?: string;
   syncedToCloud?: boolean;
   moderationStatus?: 'approved' | 'pending' | 'local_only';
   auditSummary?: string;
@@ -98,6 +112,7 @@ interface SupabaseBenchmarkRow {
   status?: 'pending' | 'approved' | 'rejected';
   audit_summary?: string | null;
   play_duration_sec?: number | null;
+  run_report?: BenchmarkHardReport | null;
 }
 
 export function computeSixDimensionScores(params: {
@@ -208,6 +223,7 @@ export function mapSupabaseRowToRecord(
       tokenEfficiency: Number(row.radar_token_efficiency),
       overallAvg: Number(row.radar_overall_avg),
     },
+    runReport: row.run_report ?? undefined,
     syncedToCloud: true,
     moderationStatus: row.status === 'pending' ? 'pending' : 'approved',
     auditSummary: row.audit_summary ?? undefined,
@@ -372,7 +388,12 @@ async function callArenaEdgeFunction<T extends Record<string, unknown>>(
 
 async function submitRecordViaEdgeFunction(
   rec: BenchmarkRunRecord,
-): Promise<{ status: 'approved' | 'pending'; message: string; auditSummary?: string }> {
+): Promise<{
+  status: 'approved' | 'pending';
+  message: string;
+  auditSummary?: string;
+  reportUpdateToken?: string;
+}> {
   const savedTicket = getSavedTicket();
   const runToken = savedTicket?.seedId === rec.seedId ? savedTicket.runToken : '';
 
@@ -381,6 +402,7 @@ async function submitRecordViaEdgeFunction(
     runToken,
     debugToolCallsCount: rec.debugToolCallsCount ?? 0,
     actionTrace: rec.actionTrace ?? [],
+    runReport: rec.runReport ?? null,
     record: {
       client_run_id: rec.id.slice(0, 80),
       model_name: (rec.modelName || 'Unknown-Model').trim().slice(0, 80),
@@ -416,6 +438,7 @@ async function submitRecordViaEdgeFunction(
     status: 'approved' | 'pending';
     message: string;
     auditSummary?: string;
+    reportUpdateToken?: string;
   }>(payload);
 
   // Clear consumed one-time ticket and immediately prefetch a fresh ticket if shift resets
@@ -535,11 +558,29 @@ export const benchmarkStore = {
     shift: GameShiftState;
     rider: RiderProfile;
     totalTokens: number;
+    usage?: ResponseUsageMetrics;
   }): BenchmarkRunRecord {
     const radar = computeSixDimensionScores({
       shift: params.shift,
       rider: params.rider,
       totalTokens: params.totalTokens,
+    });
+
+    const usageMetrics: ResponseUsageMetrics = params.usage ?? {
+      inputTokens: params.totalTokens,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: params.totalTokens,
+    };
+
+    const initialReport = buildHardTelemetryReport({
+      modelName: params.modelName,
+      blindMode: params.blindMode,
+      shift: params.shift,
+      rider: params.rider,
+      orders: params.orders ?? nexusStore.getState().orders,
+      usage: usageMetrics,
     });
 
     const isAdminUnlocked = Boolean(getSavedAdminPassword());
@@ -575,6 +616,7 @@ export const benchmarkStore = {
       actionTrace: params.shift.actionTrace ?? [],
       totalTokens: params.totalTokens,
       radar,
+      runReport: initialReport,
       syncedToCloud: false,
       moderationStatus: eligibleForCloud ? 'pending' : 'local_only',
       isLocalOwner: true,
@@ -583,6 +625,50 @@ export const benchmarkStore = {
     localRecords = [entry, ...localRecords].slice(0, 60);
     saveLocalAndEmit();
 
+    // Background helper to upgrade judge report via World Director LLM if enabled
+    const tryUpgradeWithWorldLlm = async (targetId: string, updateToken?: string) => {
+      const wCfg = worldModelStore.getState();
+      if (!wCfg.enabled || !wCfg.apiKey.trim()) return;
+      try {
+        const curRec = mergedSnapshot.find((r) => r.id === targetId);
+        if (!curRec?.runReport) return;
+        const llmJudge = await generateWorldModelJudgeEvaluation({
+          modelName: curRec.modelName,
+          seedId: curRec.seedId,
+          themeName: curRec.themeName,
+          blindMode: curRec.blindMode,
+          arenaScore: curRec.arenaScore,
+          walletYuan: curRec.walletYuan,
+          deliveriesCompleted: curRec.deliveriesCompleted,
+          totalToolCalls: curRec.totalToolCalls,
+          failedToolCalls: curRec.failedToolCalls,
+          totalTokens: curRec.totalTokens,
+          radar: curRec.radar,
+          hardReport: curRec.runReport,
+        });
+        const nextReport: BenchmarkHardReport = {
+          ...curRec.runReport,
+          judgeEvaluation: llmJudge,
+        };
+        localRecords = localRecords.map((r) =>
+          r.id === targetId ? { ...r, runReport: nextReport } : r,
+        );
+        saveLocalAndEmit();
+
+        if (updateToken || getSavedAdminPassword()) {
+          await callArenaEdgeFunction({
+            action: 'attach_report',
+            clientRunId: targetId,
+            reportUpdateToken: updateToken ?? '',
+            runReport: nextReport,
+          });
+          await this.fetchCloudLeaderboard();
+        }
+      } catch {
+        // Keep rule-based judge evaluation on failure
+      }
+    };
+
     if (!eligibleForCloud) {
       const reason =
         (params.shift.debugToolCallsCount ?? 0) > 0
@@ -590,6 +676,7 @@ export const benchmarkStore = {
           : '未满 180 分钟完赛局仅保存在浏览器本地（跑满 180 分钟零作弊局将自动提交云端审核）';
       cloudStatus = { ...cloudStatus, lastSubmitNotice: reason };
       emitOnly();
+      void tryUpgradeWithWorldLlm(entry.id);
       return entry;
     }
 
@@ -616,6 +703,7 @@ export const benchmarkStore = {
                 syncedToCloud: true,
                 moderationStatus: res.status,
                 auditSummary: res.auditSummary,
+                reportUpdateToken: res.reportUpdateToken,
               }
             : r,
         );
@@ -627,6 +715,7 @@ export const benchmarkStore = {
         };
         saveLocalAndEmit();
         await this.fetchCloudLeaderboard();
+        await tryUpgradeWithWorldLlm(entry.id, res.reportUpdateToken);
       } catch (err) {
         cloudStatus = {
           ...cloudStatus,
@@ -634,10 +723,60 @@ export const benchmarkStore = {
           error: err instanceof Error ? err.message : String(err),
         };
         emitOnly();
+        void tryUpgradeWithWorldLlm(entry.id);
       }
     })();
 
     return entry;
+  },
+
+  /**
+   * Manually invokes the World Director LLM Judge on an existing record and syncs updated `run_report`!
+   */
+  async regenerateWorldJudgeReport(recId: string, signal?: AbortSignal): Promise<void> {
+    const target = mergedSnapshot.find((r) => r.id === recId);
+    if (!target?.runReport) {
+      throw new Error('该条旧记录未包含遥测账本数据');
+    }
+    const llmJudge = await generateWorldModelJudgeEvaluation({
+      modelName: target.modelName,
+      seedId: target.seedId,
+      themeName: target.themeName,
+      blindMode: target.blindMode,
+      arenaScore: target.arenaScore,
+      walletYuan: target.walletYuan,
+      deliveriesCompleted: target.deliveriesCompleted,
+      totalToolCalls: target.totalToolCalls,
+      failedToolCalls: target.failedToolCalls,
+      totalTokens: target.totalTokens,
+      radar: target.radar,
+      hardReport: target.runReport,
+      signal,
+    });
+
+    const nextReport: BenchmarkHardReport = {
+      ...target.runReport,
+      judgeEvaluation: llmJudge,
+    };
+
+    localRecords = localRecords.map((r) =>
+      r.id === recId ? { ...r, runReport: nextReport } : r,
+    );
+    cloudRecords = cloudRecords.map((r) =>
+      r.id === recId ? { ...r, runReport: nextReport } : r,
+    );
+    saveLocalAndEmit();
+
+    const localMatch = localRecords.find((r) => r.id === recId);
+    if (target.syncedToCloud && (localMatch?.reportUpdateToken || getSavedAdminPassword())) {
+      await callArenaEdgeFunction({
+        action: 'attach_report',
+        clientRunId: recId,
+        reportUpdateToken: localMatch?.reportUpdateToken ?? '',
+        runReport: nextReport,
+      });
+      await this.fetchCloudLeaderboard();
+    }
   },
 
   /**

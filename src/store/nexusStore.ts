@@ -12,6 +12,7 @@ import type {
   RideSimulationState,
   RiderProfile,
   RouteStop,
+  ShiftLedgerEvent,
   ToolScopeMode,
   WithdrawalRecord,
   WorldEventLog,
@@ -575,6 +576,24 @@ export const nexusStore = {
     );
   },
 
+  appendShiftLedger(entry: Omit<ShiftLedgerEvent, 'id' | 'time'>) {
+    const item: ShiftLedgerEvent = {
+      ...entry,
+      id: `LDG-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      time: formatShiftClock(state.shift.elapsedMinutes),
+    };
+    commitState(
+      {
+        ...state,
+        shift: {
+          ...state.shift,
+          ledgerEvents: [...(state.shift.ledgerEvents ?? []), item].slice(-60),
+        },
+      },
+      true,
+    );
+  },
+
   recordToolTelemetry(ok: boolean, toolName?: string, countAgentCall = true) {
     const isDebug = Boolean(toolName?.startsWith('debug.'));
     const nextTrace =
@@ -584,6 +603,19 @@ export const nexusStore = {
             { tool: toolName, t: formatShiftClock(state.shift.elapsedMinutes) },
           ].slice(-380)
         : (state.shift.actionTrace ?? []);
+
+    const failLedgerItem: ShiftLedgerEvent | null =
+      countAgentCall && !ok && toolName
+        ? {
+            id: `LDG-ERR-${Date.now()}`,
+            time: formatShiftClock(state.shift.elapsedMinutes),
+            kind: 'deduction',
+            dimension: 'toolPrecision',
+            title: `工具调用失败：${toolName}`,
+            impact: '拉低精准率',
+            detail: '参数错误或未满足前置业务条件（如未到店先送达、余额不足强买装备），浪费决策轮次。',
+          }
+        : null;
 
     commitState(
       {
@@ -595,6 +627,9 @@ export const nexusStore = {
           debugToolCallsCount:
             (state.shift.debugToolCallsCount ?? 0) + (ok && isDebug ? 1 : 0),
           actionTrace: nextTrace,
+          ledgerEvents: failLedgerItem
+            ? [...(state.shift.ledgerEvents ?? []), failLedgerItem].slice(-60)
+            : (state.shift.ledgerEvents ?? []),
         },
       },
       true,

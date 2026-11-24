@@ -51,6 +51,7 @@ import {
   TurnActionStepperPills,
   TurnToolLogsModal,
 } from './RichChatContent';
+import { ShiftDiagnosticReportModal } from './ShiftDiagnosticReportModal';
 import { WorldDirectorModal } from './WorldDirectorModal';
 
 interface Props {
@@ -177,6 +178,8 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
   const [chatBusy, setChatBusy] = useState(false);
   const [showDualModal, setShowDualModal] = useState(false);
   const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
+  const [reportModalRecordId, setReportModalRecordId] = useState<string | null>(null);
+  const shiftFinalizedRef = useRef(false);
   const [showSummaryPreview, setShowSummaryPreview] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConnectionConfig>(() => loadSavedLlmConfig());
 
@@ -302,42 +305,55 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
     setChatMessages([WELCOME_MESSAGE]);
   };
 
-  // Reset round counter whenever a new session / world replay starts
+  // Reset round counter & finalized guard whenever a new session / world replay starts
   useEffect(() => {
     autoRoundCountRef.current = session.turns.length;
-  }, [session.sessionId]);
+    if (!shiftEnded) {
+      shiftFinalizedRef.current = false;
+    }
+  }, [session.sessionId, shiftEnded]);
+
+  const finalizeCompletedShiftOnce = useCallback(() => {
+    if (shiftFinalizedRef.current) return;
+    shiftFinalizedRef.current = true;
+    autoPlayRef.current = false;
+    setAutoPlayActive(false);
+
+    const endSnap = nexusStore.getState();
+    const modelLabel =
+      llmConfig.enabled && llmConfig.apiKey.trim()
+        ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
+        : '内置策略Bot';
+    const usage = responsesSession.getState().cumulativeUsage;
+    const saved = benchmarkStore.recordRun({
+      modelName: modelLabel,
+      seedId: endSnap.worldMap.seedId,
+      themeName: endSnap.worldMap.themeName,
+      worldMap: endSnap.worldMap,
+      orders: endSnap.orders,
+      blindMode: endSnap.benchmarkBlindMode,
+      shift: endSnap.shift,
+      rider: endSnap.rider,
+      totalTokens: usage.totalTokens,
+      usage,
+    });
+    setReportModalRecordId(saved.id);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: `shift-end-${Date.now()}`,
+        role: 'assistant',
+        content: `**🏁 180 分钟挑战班次圆满结束！已自动生成《六维复盘诊断报告》并同步至云端榜单！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，净钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 已为您自动弹出赛后逐笔加扣分复盘与跨模型横评报告（如世界导演大模型已启用，将自动出具独立总裁判诊断书）！`,
+      },
+    ]);
+  }, [llmConfig]);
 
   // Single AI Autonomous Step or Continuous Auto-Play Loop!
   const consecutiveAutoErrRef = useRef(0);
 
   const executeSingleArenaRound = useCallback(async () => {
     if (nexusStore.getState().shift.shiftEnded) {
-      autoPlayRef.current = false;
-      setAutoPlayActive(false);
-      const endSnap = nexusStore.getState();
-      const modelLabel =
-        llmConfig.enabled && llmConfig.apiKey.trim()
-          ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
-          : '内置策略Bot';
-      benchmarkStore.recordRun({
-        modelName: modelLabel,
-        seedId: endSnap.worldMap.seedId,
-        themeName: endSnap.worldMap.themeName,
-        worldMap: endSnap.worldMap,
-        orders: endSnap.orders,
-        blindMode: endSnap.benchmarkBlindMode,
-        shift: endSnap.shift,
-        rider: endSnap.rider,
-        totalTokens: responsesSession.getState().cumulativeUsage.totalTokens,
-      });
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: `shift-end-${Date.now()}`,
-          role: 'assistant',
-          content: `**180 分钟午高峰挑战班次圆满结束！成绩已提交至【云端评测安全网关】！**\n- 评测模型：**${modelLabel}**（种子：\`${endSnap.worldMap.seedId}\`）\n- 最终段位总分：**${endSnap.shift.arenaScore} 分**，钱包结余 ¥${endSnap.rider.walletYuan.toFixed(2)}\n- 点击顶部 **【云端榜单】** 可查看六维能力雷达图（访客成绩经反作弊核验后进入待审队列，管理员审核通过后全网公开）！`,
-        },
-      ]);
+      finalizeCompletedShiftOnce();
       return false;
     }
 
@@ -392,6 +408,10 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
             content: `**【世界种子定时事件 · ${latestEv.gameTimeLabel}】** ${latestEv.title}\n> ${latestEv.detail}`,
           },
         ]);
+      }
+      if (postSnap.shift.shiftEnded) {
+        finalizeCompletedShiftOnce();
+        return false;
       }
       return true;
     } catch (err) {
@@ -1242,6 +1262,12 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
             ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
             : '内置策略Bot'
         }
+      />
+
+      {/* Post-Shift 6D Diagnostic Report & Cross-Model Comparison Modal */}
+      <ShiftDiagnosticReportModal
+        recordId={reportModalRecordId}
+        onClose={() => setReportModalRecordId(null)}
       />
     </>
   );
