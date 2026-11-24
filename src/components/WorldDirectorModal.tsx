@@ -21,6 +21,8 @@ import {
 import { nexusStore, useNexusStore } from '../store/nexusStore';
 import {
   type LlmConnectionConfig,
+  REASONING_EFFORT_OPTIONS,
+  type ReasoningEffortLevel,
   resolveResponsesEndpoint,
   testLlmEndpointConnection,
 } from '../webmcp/agentPlaybooks';
@@ -629,6 +631,30 @@ export const WorldDirectorModal: React.FC<Props> = ({
                       className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-slate-100"
                     />
                   </label>
+
+                  <label className="space-y-1 sm:col-span-2">
+                    <div className="flex justify-between text-[11px] text-slate-400">
+                      <span>导演思考程度 (Reasoning Effort)</span>
+                      <span className="text-[10px] text-indigo-300">
+                        生图建城推荐 中/高 · NPC快速互动推荐 关闭/低
+                      </span>
+                    </div>
+                    <select
+                      value={worldCfg.reasoningEffort ?? 'default'}
+                      onChange={(e) =>
+                        worldModelStore.update({
+                          reasoningEffort: e.target.value as ReasoningEffortLevel,
+                        })
+                      }
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-slate-200"
+                    >
+                      {REASONING_EFFORT_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.fullLabel}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
 
                 <div className="flex items-center justify-between pt-1">
@@ -754,6 +780,33 @@ export const WorldDirectorModal: React.FC<Props> = ({
                     }
                     className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-slate-100"
                   />
+                </label>
+
+                <label className="space-y-1 sm:col-span-2">
+                  <div className="flex justify-between text-[11px] text-slate-400">
+                    <span className="font-semibold text-amber-300">
+                      外卖员模型思考程度 (Reasoning Effort · 支持同模型不同思考强度打榜对比!)
+                    </span>
+                    <span className="text-[10px] text-slate-400">
+                      若模型不支持该参数将自动无损回退
+                    </span>
+                  </div>
+                  <select
+                    value={riderLlmConfig.reasoningEffort ?? 'default'}
+                    onChange={(e) =>
+                      onChangeRiderLlm((c) => ({
+                        ...c,
+                        reasoningEffort: e.target.value as ReasoningEffortLevel,
+                      }))
+                    }
+                    className="w-full rounded-lg border border-amber-500/40 bg-slate-900 px-2.5 py-1.5 font-medium text-amber-200"
+                  >
+                    {REASONING_EFFORT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.fullLabel}
+                      </option>
+                    ))}
+                  </select>
                 </label>
 
                 <label className="space-y-1">

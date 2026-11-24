@@ -27,7 +27,10 @@ import {
   AGENT_PLAYBOOKS,
   type AgentChatMessage,
   buildPlaybookSummaryText,
+  formatReasoningEffortTag,
   type LlmConnectionConfig,
+  REASONING_EFFORT_OPTIONS,
+  type ReasoningEffortLevel,
   runAutonomousArenaRound,
   runNaturalLanguageWebMCPTurn,
   type TurnToolCallLog,
@@ -71,6 +74,7 @@ const DEFAULT_LLM_CONFIG: LlmConnectionConfig = {
   baseUrl: 'https://api.openai.com/v1',
   apiKey: '',
   model: 'gpt-4.1-mini',
+  reasoningEffort: 'default',
 };
 
 const WELCOME_MESSAGE: AgentChatMessage = {
@@ -93,6 +97,7 @@ function loadSavedLlmConfig(): LlmConnectionConfig {
       baseUrl: parsed.baseUrl ?? DEFAULT_LLM_CONFIG.baseUrl,
       apiKey: parsed.apiKey ?? '',
       model: parsed.model ?? DEFAULT_LLM_CONFIG.model,
+      reasoningEffort: parsed.reasoningEffort ?? 'default',
     };
   } catch {
     return DEFAULT_LLM_CONFIG;
@@ -310,7 +315,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
       const endSnap = nexusStore.getState();
       const modelLabel =
         llmConfig.enabled && llmConfig.apiKey.trim()
-          ? llmConfig.model.trim() || 'Rider-LLM'
+          ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
           : '内置策略Bot';
       benchmarkStore.recordRun({
         modelName: modelLabel,
@@ -782,24 +787,42 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
                 </button>
               </div>
 
-              {/* Context Management Strip + Tactical Playbooks Toggle */}
+              {/* Reasoning Effort Quick Switcher + Context Management Strip */}
               <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-lg border border-slate-800/90 bg-slate-900/80 px-2.5 py-1 text-[11px]">
                 <div className="flex flex-wrap items-center gap-1.5 text-slate-300">
-                  <Layers className="h-3 w-3 text-indigo-400" />
-                  <span className="font-mono">
-                    上下文 {session.turns.length}/{session.maxWindowTurns} 轮
+                  <span className="text-[10px] font-semibold text-amber-300">思考程度:</span>
+                  <select
+                    value={llmConfig.reasoningEffort ?? 'default'}
+                    onChange={(e) =>
+                      setLlmConfig((prev) => ({
+                        ...prev,
+                        reasoningEffort: e.target.value as ReasoningEffortLevel,
+                      }))
+                    }
+                    title="快速切换外卖员大模型思考深度 (reasoning.effort / thinking)"
+                    className="rounded border border-amber-500/35 bg-slate-950 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-200 focus:border-amber-400 focus:outline-none"
+                  >
+                    {REASONING_EFFORT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.shortLabel}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-slate-700">|</span>
+                  <span className="font-mono text-[10px]">
+                    上下文 {session.turns.length}/{session.maxWindowTurns}轮
                   </span>
                   {session.compactedTurnCount > 0 && (
                     <button
                       type="button"
                       onClick={() => setShowSummaryPreview((v) => !v)}
-                      className="rounded bg-indigo-500/20 px-1.5 py-0.5 font-mono text-[10px] text-indigo-300"
+                      className="rounded bg-indigo-500/20 px-1 py-0.5 font-mono text-[10px] text-indigo-300"
                     >
-                      已摘要{session.compactedTurnCount}轮
+                      已摘要{session.compactedTurnCount}
                     </button>
                   )}
                   <span className="font-mono text-[10px] text-slate-400">
-                    ~{estimatedCtxTokens} tok
+                    ~{estimatedCtxTokens}tok
                   </span>
                 </div>
 
@@ -1198,7 +1221,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         onClose={() => setShowLeaderboardModal(false)}
         activeRiderModelLabel={
           llmConfig.enabled && llmConfig.apiKey.trim()
-            ? llmConfig.model.trim() || 'Rider-LLM'
+            ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
             : '内置策略Bot'
         }
       />

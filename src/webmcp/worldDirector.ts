@@ -11,6 +11,11 @@ import type {
   WorldMerchant,
 } from '../types/domain';
 import {
+  formatReasoningEffortTag,
+  postResponsesRequest,
+  type ReasoningEffortLevel,
+} from './agentPlaybooks';
+import {
   createSeededRng,
   encodeWorldToShareSeed,
   generateRandomSeedId,
@@ -26,6 +31,7 @@ export interface WorldModelConfig {
   apiKey: string;
   model: string;
   difficulty: WorldDifficulty;
+  reasoningEffort?: ReasoningEffortLevel;
 }
 
 const WORLD_LLM_STORAGE_KEY = 'ridergo_world_llm_config_v1';
@@ -37,6 +43,7 @@ const DEFAULT_WORLD_CONFIG: WorldModelConfig = {
   apiKey: '',
   model: 'gpt-4.1-mini',
   difficulty: 'hardcore',
+  reasoningEffort: 'default',
 };
 
 function loadWorldConfig(): WorldModelConfig {
@@ -52,6 +59,7 @@ function loadWorldConfig(): WorldModelConfig {
       apiKey: parsed.apiKey ?? '',
       model: parsed.model ?? DEFAULT_WORLD_CONFIG.model,
       difficulty: parsed.difficulty ?? 'hardcore',
+      reasoningEffort: parsed.reasoningEffort ?? 'default',
     };
   } catch {
     return DEFAULT_WORLD_CONFIG;
@@ -113,26 +121,24 @@ async function callWorldResponsesJson<T>(
   const cfg = worldModelStore.getState();
   const endpoint = resolveWorldResponsesUrl(cfg.baseUrl);
 
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${cfg.apiKey.trim()}`,
-    },
-    body: JSON.stringify({
+  const apiRes = await postResponsesRequest(
+    endpoint,
+    cfg.apiKey,
+    {
       model: cfg.model.trim() || 'gpt-4.1-mini',
       instructions: `${systemInstructions}\n请严格只输出合法的 JSON 对象，不要输出 Markdown 代码块标记或多余解释文字。`,
       input: userPrompt,
       store: false,
-    }),
+    },
     signal,
-  });
+    cfg.reasoningEffort ?? 'default',
+  );
 
-  if (!resp.ok) {
-    throw new Error(`World Model HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  if (!apiRes.ok) {
+    throw new Error(`World Model HTTP ${apiRes.status}: ${apiRes.errText.slice(0, 200)}`);
   }
 
-  const data = (await resp.json()) as {
+  const data = apiRes.data as {
     output_text?: string;
     output?: Array<{ type?: string; content?: Array<{ text?: string }> }>;
   };
@@ -170,7 +176,8 @@ export async function testWorldModelConnection(): Promise<string> {
   );
   const ms = Math.round(performance.now() - started);
   worldModelStore.update({ enabled: true });
-  return `世界导演模型连通成功 (${cfg.model}, ${ms}ms): ${res.status || 'OK'}`;
+  const effortTag = formatReasoningEffortTag(cfg.reasoningEffort);
+  return `世界导演模型连通成功 (${cfg.model} · 思考:${effortTag}, ${ms}ms): ${res.status || 'OK'}`;
 }
 
 function clampCoord(val: number, min: number, max: number): number {

@@ -208,12 +208,33 @@ export interface AgentChatMessage {
   tokenBadge?: string;
 }
 
+export type ReasoningEffortLevel = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
+export const REASONING_EFFORT_OPTIONS: Array<{
+  value: ReasoningEffortLevel;
+  shortLabel: string;
+  fullLabel: string;
+}> = [
+  { value: 'default', shortLabel: '默认', fullLabel: '跟随模型默认 (Default)' },
+  { value: 'none', shortLabel: '关闭思考', fullLabel: '关闭思考 (none/disabled · 极速省Token)' },
+  { value: 'minimal', shortLabel: '极简', fullLabel: '极简思考 (minimal · GPT-5系列)' },
+  { value: 'low', shortLabel: '低(Low)', fullLabel: '低度思考 (low · 快速决策)' },
+  { value: 'medium', shortLabel: '中(Med)', fullLabel: '中度思考 (medium · 均衡推理)' },
+  { value: 'high', shortLabel: '高(High)', fullLabel: '深度思考 (high · 极限运筹规划)' },
+];
+
+export function formatReasoningEffortTag(effort?: ReasoningEffortLevel): string {
+  const found = REASONING_EFFORT_OPTIONS.find((o) => o.value === (effort ?? 'default'));
+  return found ? found.shortLabel : '默认';
+}
+
 export interface LlmConnectionConfig {
   enabled: boolean;
   providerPreset: string;
   baseUrl: string;
   apiKey: string;
   model: string;
+  reasoningEffort?: ReasoningEffortLevel;
 }
 
 interface ResponsesApiPayload {
@@ -340,44 +361,11 @@ function parseResponsesPayload(data: ResponsesApiPayload) {
   };
 }
 
-export async function testLlmEndpointConnection(
-  config: Pick<LlmConnectionConfig, 'baseUrl' | 'apiKey' | 'model'>,
-): Promise<{ ok: boolean; latencyMs: number; message: string }> {
-  const started = performance.now();
-  const endpoint = resolveResponsesEndpoint(config.baseUrl);
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey.trim()}`,
-    },
-    body: JSON.stringify({
-      model: config.model.trim() || 'gpt-4.1-mini',
-      input: '请仅回复 OK 两个字母',
-      max_output_tokens: 32,
-      store: false,
-    }),
-  });
-  const latencyMs = Math.round(performance.now() - started);
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Responses API HTTP ${resp.status}: ${errText.slice(0, 200)}`);
-  }
-  const data = (await resp.json()) as ResponsesApiPayload;
-  const parsed = parseResponsesPayload(data);
-  const reply = parsed.assistantText || 'OK';
-  return {
-    ok: true,
-    latencyMs,
-    message: `外卖员模型连通成功 (${data.model || config.model}, ${latencyMs}ms): "${reply}"`,
-  };
-}
-
-async function postResponsesRequest(
+async function sendSingleResponsesFetch(
   endpoint: string,
   apiKey: string,
   body: Record<string, unknown>,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
   const resp = await fetch(endpoint, {
     method: 'POST',
@@ -396,6 +384,105 @@ async function postResponsesRequest(
     return { ok: false, status: 400, errText: data.error.message };
   }
   return { ok: true, data };
+}
+
+/**
+ * Sends a `/v1/responses` request with `reasoning.effort` (or `thinking: { type: "disabled" }`)
+ * and gracefully auto-fallbacks if the target model does not support that reasoning parameter!
+ */
+export async function postResponsesRequest(
+  endpoint: string,
+  apiKey: string,
+  baseBody: Record<string, unknown>,
+  signal?: AbortSignal,
+  reasoningEffort: ReasoningEffortLevel = 'default',
+): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
+  if (!reasoningEffort || reasoningEffort === 'default') {
+    return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
+  }
+
+  if (reasoningEffort === 'none') {
+    // Try OpenAI GPT-5.1+ / OpenRouter `reasoning: { effort: "none" }` first
+    const r1 = await sendSingleResponsesFetch(
+      endpoint,
+      apiKey,
+      { ...baseBody, reasoning: { effort: 'none' } },
+      signal,
+    );
+    if (r1.ok || (r1.status !== 400 && r1.status !== 422)) return r1;
+    if (!/reasoning|effort|none|unsupported|unknown|invalid/i.test(r1.errText)) return r1;
+
+    // Fallback to DeepSeek / Volcengine Ark `thinking: { type: "disabled" }`
+    const r2 = await sendSingleResponsesFetch(
+      endpoint,
+      apiKey,
+      { ...baseBody, thinking: { type: 'disabled' } },
+      signal,
+    );
+    if (r2.ok || (r2.status !== 400 && r2.status !== 422)) return r2;
+    if (!/thinking|disabled|unsupported|unknown|invalid/i.test(r2.errText)) return r2;
+
+    // Final fallback for pure non-reasoning models (e.g. gpt-4.1-mini) where thinking is already off
+    return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
+  }
+
+  // `minimal` | `low` | `medium` | `high`
+  const rEffort = await sendSingleResponsesFetch(
+    endpoint,
+    apiKey,
+    { ...baseBody, reasoning: { effort: reasoningEffort } },
+    signal,
+  );
+  if (rEffort.ok || (rEffort.status !== 400 && rEffort.status !== 422)) return rEffort;
+
+  // If `minimal` is unsupported on o3/o4-mini/DeepSeek, try `low` before stripping
+  if (reasoningEffort === 'minimal' && /minimal|effort|invalid|unsupported/i.test(rEffort.errText)) {
+    const rLow = await sendSingleResponsesFetch(
+      endpoint,
+      apiKey,
+      { ...baseBody, reasoning: { effort: 'low' } },
+      signal,
+    );
+    if (rLow.ok) return rLow;
+  }
+
+  // If model is a non-reasoning model that rejects `reasoning`, fallback cleanly without crashing
+  if (/reasoning|effort|unsupported|unknown/i.test(rEffort.errText)) {
+    return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
+  }
+
+  return rEffort;
+}
+
+export async function testLlmEndpointConnection(
+  config: Pick<LlmConnectionConfig, 'baseUrl' | 'apiKey' | 'model' | 'reasoningEffort'>,
+): Promise<{ ok: boolean; latencyMs: number; message: string }> {
+  const started = performance.now();
+  const endpoint = resolveResponsesEndpoint(config.baseUrl);
+  const res = await postResponsesRequest(
+    endpoint,
+    config.apiKey,
+    {
+      model: config.model.trim() || 'gpt-4.1-mini',
+      input: '请仅回复 OK 两个字母',
+      max_output_tokens: 64,
+      store: false,
+    },
+    undefined,
+    config.reasoningEffort ?? 'default',
+  );
+  const latencyMs = Math.round(performance.now() - started);
+  if (!res.ok) {
+    throw new Error(`Responses API HTTP ${res.status}: ${res.errText.slice(0, 200)}`);
+  }
+  const parsed = parseResponsesPayload(res.data);
+  const reply = parsed.assistantText || 'OK';
+  const effortTag = formatReasoningEffortTag(config.reasoningEffort);
+  return {
+    ok: true,
+    latencyMs,
+    message: `外卖员模型连通成功 (${res.data.model || config.model} · 思考:${effortTag}, ${latencyMs}ms): "${reply}"`,
+  };
 }
 
 function buildRichLocalReply(toolLogs: TurnToolCallLog[]): string {
@@ -549,7 +636,10 @@ export function buildPlaybookSummaryText(pbName: string, toolLogs: TurnToolCallL
  * - Otherwise executes a smart built-in tactical AI bot via `document.modelContext` so Auto-Play works zero-config too!
  */
 export async function runAutonomousArenaRound(
-  llmConfig: Pick<LlmConnectionConfig, 'enabled' | 'baseUrl' | 'apiKey' | 'model'>,
+  llmConfig: Pick<
+    LlmConnectionConfig,
+    'enabled' | 'baseUrl' | 'apiKey' | 'model' | 'reasoningEffort'
+  >,
   signal: AbortSignal,
   onProgress: (statusText: string) => void,
 ): Promise<Omit<AgentChatMessage, 'id'>> {
@@ -685,7 +775,10 @@ export async function runAutonomousArenaRound(
 
 export async function runNaturalLanguageWebMCPTurn(
   prompt: string,
-  llmConfig: Pick<LlmConnectionConfig, 'enabled' | 'baseUrl' | 'apiKey' | 'model'>,
+  llmConfig: Pick<
+    LlmConnectionConfig,
+    'enabled' | 'baseUrl' | 'apiKey' | 'model' | 'reasoningEffort'
+  >,
   signal: AbortSignal,
   onProgress: (statusText: string) => void,
 ): Promise<Omit<AgentChatMessage, 'id'>> {
@@ -694,6 +787,8 @@ export async function runNaturalLanguageWebMCPTurn(
   // Mode A: Rider Player Model via OpenAI Responses API (`POST /v1/responses`)
   if (llmConfig.enabled && llmConfig.apiKey.trim()) {
     const endpoint = resolveResponsesEndpoint(llmConfig.baseUrl);
+    const effort = llmConfig.reasoningEffort ?? 'default';
+    const effortTag = formatReasoningEffortTag(effort);
     responsesSession.syncEndpointBinding(endpoint);
 
     const sessSnap = responsesSession.getState();
@@ -720,8 +815,8 @@ export async function runNaturalLanguageWebMCPTurn(
     for (let round = 0; round < 8; round++) {
       onProgress(
         round === 0
-          ? `外卖员模型 (${llmConfig.model}) 正在制定跑单策略...`
-          : `外卖员模型正在推进第 ${round + 1} 步连招...`,
+          ? `外卖员模型 (${llmConfig.model} · 思考:${effortTag}) 正在制定策略...`
+          : `外卖员模型 (思考:${effortTag}) 正在推进第 ${round + 1} 步连招...`,
       );
 
       const currentDiscovered = await discoverWebMCPTools();
@@ -771,7 +866,13 @@ export async function runNaturalLanguageWebMCPTurn(
         };
       }
 
-      let apiRes = await postResponsesRequest(endpoint, llmConfig.apiKey, requestBody, signal);
+      let apiRes = await postResponsesRequest(
+        endpoint,
+        llmConfig.apiKey,
+        requestBody,
+        signal,
+        effort,
+      );
 
       // Automatic fallback 1: Stateless `/v1/responses` gateways (DeepSeek / Ark / NewAPI / OneAPI)
       // do not store `previous_response_id`; auto-downgrade to `sliding_window` and retry seamlessly!
@@ -798,6 +899,7 @@ export async function runNaturalLanguageWebMCPTurn(
             store: false,
           },
           signal,
+          effort,
         );
       }
 
@@ -833,6 +935,7 @@ export async function runNaturalLanguageWebMCPTurn(
             store: false,
           },
           signal,
+          effort,
         );
       }
 
@@ -861,9 +964,11 @@ export async function runNaturalLanguageWebMCPTurn(
 
         const tokenBadge =
           turnUsage.totalTokens > 0
-            ? `in:${turnUsage.inputTokens}${
+            ? `思考:${effortTag} · in:${turnUsage.inputTokens}${
                 turnUsage.cachedInputTokens > 0 ? `(缓存${turnUsage.cachedInputTokens})` : ''
-              } · out:${turnUsage.outputTokens}`
+              } · out:${turnUsage.outputTokens}${
+                turnUsage.reasoningTokens > 0 ? `(推理${turnUsage.reasoningTokens})` : ''
+              }`
             : undefined;
 
         responsesSession.recordCompletedTurn({
