@@ -28,6 +28,7 @@ import {
   type AgentChatMessage,
   buildPlaybookSummaryText,
   formatReasoningEffortTag,
+  isLlmConfigReady,
   type LlmConnectionConfig,
   normalizeReasoningEffort,
   REASONING_EFFORT_SUGGESTIONS,
@@ -320,10 +321,9 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
     setAutoPlayActive(false);
 
     const endSnap = nexusStore.getState();
-    const modelLabel =
-      llmConfig.enabled && llmConfig.apiKey.trim()
-        ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
-        : '内置策略Bot';
+    const modelLabel = isLlmConfigReady(llmConfig)
+      ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
+      : '内置策略Bot';
     const usage = responsesSession.getState().cumulativeUsage;
     const saved = benchmarkStore.recordRun({
       modelName: modelLabel,
@@ -660,8 +660,8 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
 
   const isAnythingRunning =
     Boolean(runningPlaybookId) || chatBusy || toolResult.status === 'running' || autoPlayActive;
-  const isRiderLlmActive = llmConfig.enabled && Boolean(llmConfig.apiKey.trim());
-  const isWorldLlmActive = worldCfg.enabled && Boolean(worldCfg.apiKey.trim());
+  const isRiderLlmActive = isLlmConfigReady(llmConfig);
+  const isWorldLlmActive = isLlmConfigReady(worldCfg);
   const estimatedCtxTokens = estimateActiveContextTokens(session);
 
   return (
@@ -1258,7 +1258,7 @@ export const WebMCPConsoleDock: React.FC<Props> = ({
         open={showLeaderboardModal}
         onClose={() => setShowLeaderboardModal(false)}
         activeRiderModelLabel={
-          llmConfig.enabled && llmConfig.apiKey.trim()
+          isLlmConfigReady(llmConfig)
             ? `${llmConfig.model.trim() || 'Rider-LLM'} (思考:${formatReasoningEffortTag(llmConfig.reasoningEffort)})`
             : '内置策略Bot'
         }

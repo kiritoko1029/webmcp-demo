@@ -19,8 +19,11 @@ import type {
 } from '../types/domain';
 import {
   formatReasoningEffortTag,
+  isLlmConfigReady,
   normalizeReasoningEffort,
   postResponsesRequest,
+  requiresExplicitApiKey,
+  resolveResponsesEndpoint,
 } from './agentPlaybooks';
 import { responsesSession } from './responsesSessionManager';
 import {
@@ -113,13 +116,9 @@ export function useWorldModelConfig(): WorldModelConfig {
   );
 }
 
-function resolveWorldResponsesUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, '');
-  return trimmed.endsWith('/responses') ? trimmed : `${trimmed}/responses`;
-}
-
 /**
- * Calls the independent World Director Model via OpenAI `POST /v1/responses` and parses JSON.
+ * Calls the independent World Director Model via OpenAI `POST /v1/responses`
+ * (with automatic `/v1/chat/completions` fallback for local engines) and parses JSON.
  */
 async function callWorldResponsesJson<T>(
   systemInstructions: string,
@@ -127,7 +126,7 @@ async function callWorldResponsesJson<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const cfg = worldModelStore.getState();
-  const endpoint = resolveWorldResponsesUrl(cfg.baseUrl);
+  const endpoint = resolveResponsesEndpoint(cfg.baseUrl);
 
   const apiRes = await postResponsesRequest(
     endpoint,
@@ -166,17 +165,29 @@ async function callWorldResponsesJson<T>(
   }
 
   const cleaned = rawText
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
 
-  return JSON.parse(cleaned) as T;
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  const jsonSlice =
+    firstBrace >= 0 && lastBrace > firstBrace
+      ? cleaned.slice(firstBrace, lastBrace + 1)
+      : cleaned;
+
+  return JSON.parse(jsonSlice) as T;
 }
 
 export async function testWorldModelConnection(): Promise<string> {
   const cfg = worldModelStore.getState();
-  if (!cfg.apiKey.trim()) throw new Error('请先填写世界模型 API Key');
+  if (requiresExplicitApiKey(cfg.baseUrl) && !cfg.apiKey.trim()) {
+    throw new Error(
+      '当前云端接口需要填写 API Key（若使用本机模型如 Ollama / LM Studio，请先将 Base URL 改为 http://127.0.0.1:端口/v1）',
+    );
+  }
   const started = performance.now();
   const res = await callWorldResponsesJson<{ status: string }>(
     '你是游戏世界导演模型。',
@@ -548,7 +559,7 @@ export async function generateNewWorldByDirector(
   const seedId = options?.customSeedId?.trim() || generateRandomSeedId('RG');
   const syncUrlHash = options?.syncUrlHash !== false;
 
-  if (cfg.enabled && cfg.apiKey.trim()) {
+  if (isLlmConfigReady(cfg)) {
     interface LlmWorldSpec {
       themeName: string;
       themeDescription: string;
@@ -1149,7 +1160,7 @@ export async function bakeDirectorEventsIntoCurrentSeed(
   const s = nexusStore.getState();
   const curMap = s.worldMap;
 
-  if (cfg.enabled && cfg.apiKey.trim()) {
+  if (isLlmConfigReady(cfg)) {
     interface LlmTimelineSpec {
       events: Array<{
         minute: number;

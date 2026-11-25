@@ -19,6 +19,7 @@ import {
   useBenchmarkRecords,
 } from '../store/benchmarkStore';
 import type { RadarDimensionKey } from '../types/domain';
+import { isLlmConfigReady } from '../webmcp/agentPlaybooks';
 import { useWorldModelConfig } from '../webmcp/worldDirector';
 
 const DIM_LABELS: Array<{ key: RadarDimensionKey; label: string }> = [
@@ -71,7 +72,7 @@ export const ShiftDiagnosticReportModal: React.FC<Props> = ({
   const rep = primaryRec.runReport;
   const oppRep = effectiveCompareRec?.runReport;
   const judge = rep?.judgeEvaluation;
-  const worldLlmReady = worldCfg.enabled && Boolean(worldCfg.apiKey.trim());
+  const worldLlmReady = isLlmConfigReady(worldCfg);
 
   const handleRunWorldJudge = async () => {
     setJudgingBusy(true);

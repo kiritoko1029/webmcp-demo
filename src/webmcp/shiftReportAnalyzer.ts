@@ -9,7 +9,11 @@ import type {
   ShiftJudgeEvaluation,
   ShiftLedgerEvent,
 } from '../types/domain';
-import { postResponsesRequest, resolveResponsesEndpoint } from './agentPlaybooks';
+import {
+  isLlmConfigReady,
+  postResponsesRequest,
+  resolveResponsesEndpoint,
+} from './agentPlaybooks';
 import type { ResponseUsageMetrics } from './responsesSessionManager';
 import { worldModelStore } from './worldDirector';
 
@@ -248,8 +252,8 @@ export async function generateWorldModelJudgeEvaluation(params: {
   signal?: AbortSignal;
 }): Promise<ShiftJudgeEvaluation> {
   const cfg = worldModelStore.getState();
-  if (!cfg.enabled || !cfg.apiKey.trim()) {
-    throw new Error('请先在顶部【双模型 & 种子】中配置并启用「世界导演大模型」API Key');
+  if (!isLlmConfigReady(cfg)) {
+    throw new Error('请先在顶部【双模型 & 种子】中配置并启用「世界导演大模型」');
   }
 
   const endpoint = resolveResponsesEndpoint(cfg.baseUrl);

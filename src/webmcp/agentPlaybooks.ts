@@ -244,6 +244,7 @@ interface ResponsesApiPayload {
   model?: string;
   status?: string;
   output_text?: string;
+  _protocolUsed?: 'responses' | 'chat_completions';
   error?: { message?: string; code?: string };
   usage?: {
     input_tokens?: number;
@@ -261,9 +262,204 @@ interface ResponsesApiPayload {
   output?: Array<Record<string, unknown>>;
 }
 
+function isPrivateIpv4Host(hostname: string): boolean {
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+  const m172 = hostname.match(/^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (m172) {
+    const second = Number(m172[1]);
+    return second >= 16 && second <= 31;
+  }
+  return false;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h.endsWith('.localhost') ||
+    h === '127.0.0.1' ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h) ||
+    h === '::1' ||
+    h === '[::1]'
+  );
+}
+
+/**
+ * Normalizes user-entered Base URL:
+ * - Auto-prepends `http://` for bare loopback/LAN/host:port inputs (`127.0.0.1:11434/v1`, `localhost:1234`)
+ * - Rewrites `0.0.0.0` to `127.0.0.1` so browsers treat it as a trustworthy loopback origin
+ * - Strips trailing slashes
+ */
+export function normalizeBaseUrlInput(rawBaseUrl: string): string {
+  const trimmed = rawBaseUrl.trim();
+  if (!trimmed) return '';
+
+  let withScheme = trimmed;
+  if (!/^https?:\/\//i.test(withScheme)) {
+    const hostPart = withScheme.split('/')[0]?.toLowerCase() ?? '';
+    const looksLocalOrPlainPort =
+      hostPart.startsWith('localhost') ||
+      hostPart.startsWith('127.') ||
+      hostPart.startsWith('[::1]') ||
+      hostPart.startsWith('0.0.0.0') ||
+      hostPart.startsWith('192.168.') ||
+      hostPart.startsWith('10.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostPart) ||
+      hostPart.startsWith('host.docker.internal') ||
+      hostPart.includes('.local') ||
+      /^[a-z0-9.-]+:\d+$/i.test(hostPart);
+    withScheme = `${looksLocalOrPlainPort ? 'http' : 'https'}://${withScheme}`;
+  }
+
+  return withScheme
+    .replace(/^(https?:\/\/)0\.0\.0\.0(?=[:/]|$)/i, '$1127.0.0.1')
+    .replace(/\/+$/, '');
+}
+
+export function isLocalEndpointUrl(rawBaseUrl: string): boolean {
+  const normalized = normalizeBaseUrlInput(rawBaseUrl);
+  if (!normalized) return false;
+  try {
+    const u = new URL(normalized);
+    const h = u.hostname.toLowerCase();
+    return (
+      isLoopbackHost(h) ||
+      isPrivateIpv4Host(h) ||
+      h === '0.0.0.0' ||
+      h === 'host.docker.internal' ||
+      h.endsWith('.local')
+    );
+  } catch {
+    return /localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.|10\./i.test(normalized);
+  }
+}
+
+/**
+ * Known public cloud SaaS endpoints require an explicit API Key;
+ * local services (Ollama / LM Studio / vLLM / llama.cpp) & self-hosted gateways allow empty API Keys.
+ */
+export function requiresExplicitApiKey(rawBaseUrl: string): boolean {
+  const normalized = normalizeBaseUrlInput(rawBaseUrl);
+  if (!normalized) return true;
+  if (isLocalEndpointUrl(normalized)) return false;
+  try {
+    const h = new URL(normalized).hostname.toLowerCase();
+    return (
+      h === 'api.openai.com' ||
+      h.endsWith('.volces.com') ||
+      h === 'api.deepseek.com' ||
+      h === 'api.anthropic.com' ||
+      h.endsWith('.aliyuncs.com') ||
+      h === 'openrouter.ai'
+    );
+  } catch {
+    return true;
+  }
+}
+
+export function isLlmConfigReady(cfg: {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+}): boolean {
+  if (!cfg.enabled || !cfg.baseUrl.trim()) return false;
+  return Boolean(cfg.apiKey.trim()) || !requiresExplicitApiKey(cfg.baseUrl);
+}
+
+export interface HttpsLocalUrlInspection {
+  isHttpsPage: boolean;
+  isHttpTarget: boolean;
+  isLoopback: boolean;
+  isPrivateLanOrZero: boolean;
+  isSafari: boolean;
+  hostname: string;
+  suggestedLoopbackUrl?: string;
+}
+
+export function inspectHttpsToLocalHttp(rawBaseUrl: string): HttpsLocalUrlInspection {
+  const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const isSafari =
+    typeof navigator !== 'undefined' &&
+    /^((?!chrome|chromium|crios|edg|opr|android).)*safari/i.test(navigator.userAgent);
+  const rawTrimmed = rawBaseUrl.trim();
+  const hadZeroHost = /^(?:https?:\/\/)?0\.0\.0\.0(?=[:/]|$)/i.test(rawTrimmed);
+  const normalized = normalizeBaseUrlInput(rawTrimmed);
+
+  if (!normalized) {
+    return {
+      isHttpsPage,
+      isHttpTarget: false,
+      isLoopback: false,
+      isPrivateLanOrZero: false,
+      isSafari,
+      hostname: '',
+    };
+  }
+
+  try {
+    const u = new URL(normalized);
+    const hostname = u.hostname.toLowerCase();
+    const isHttpTarget = u.protocol === 'http:';
+    const isLoopback = isLoopbackHost(hostname) && !hadZeroHost;
+    const isPrivateLanOrZero =
+      hadZeroHost ||
+      isPrivateIpv4Host(hostname) ||
+      hostname === 'host.docker.internal' ||
+      hostname.endsWith('.local');
+
+    let suggestedLoopbackUrl: string | undefined;
+    if (isHttpTarget && isPrivateLanOrZero) {
+      const fixed = new URL(normalized);
+      fixed.hostname = '127.0.0.1';
+      suggestedLoopbackUrl = fixed.toString().replace(/\/+$/, '');
+    }
+
+    return {
+      isHttpsPage,
+      isHttpTarget,
+      isLoopback,
+      isPrivateLanOrZero,
+      isSafari,
+      hostname: hadZeroHost ? '0.0.0.0' : hostname,
+      suggestedLoopbackUrl,
+    };
+  } catch {
+    return {
+      isHttpsPage,
+      isHttpTarget: normalized.startsWith('http://'),
+      isLoopback: false,
+      isPrivateLanOrZero: hadZeroHost,
+      isSafari,
+      hostname: '',
+    };
+  }
+}
+
 export function resolveResponsesEndpoint(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, '');
-  return trimmed.endsWith('/responses') ? trimmed : `${trimmed}/responses`;
+  const normalized = normalizeBaseUrlInput(baseUrl);
+  if (!normalized) return 'https://api.openai.com/v1/responses';
+  if (normalized.endsWith('/responses') || normalized.endsWith('/chat/completions')) {
+    return normalized;
+  }
+  try {
+    const u = new URL(normalized);
+    if (!u.pathname || u.pathname === '/') {
+      return `${normalized}/v1/responses`;
+    }
+  } catch {
+    // Fallback to suffix append
+  }
+  return `${normalized}/responses`;
+}
+
+function deriveChatCompletionsEndpoint(endpoint: string): string {
+  const trimmed = endpoint.trim().replace(/\/+$/, '');
+  if (trimmed.endsWith('/chat/completions')) return trimmed;
+  if (trimmed.endsWith('/responses')) {
+    return `${trimmed.slice(0, -'/responses'.length)}/chat/completions`;
+  }
+  return `${trimmed}/chat/completions`;
 }
 
 function normalizeToolSchemaForResponses(raw: Record<string, unknown> | null): Record<string, unknown> {
@@ -391,6 +587,61 @@ function parseResponsesPayload(data: ResponsesApiPayload) {
 }
 
 const unsupportedReasoningModels = new Set<string>();
+const chatCompletionsFallbackEndpoints = new Set<string>();
+
+function buildJsonHeaders(apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const trimmedKey = apiKey.trim();
+  if (trimmedKey) {
+    headers.Authorization = `Bearer ${trimmedKey}`;
+  }
+  return headers;
+}
+
+function formatFetchNetworkError(err: unknown, endpoint: string): Error {
+  if (err instanceof DOMException && err.name === 'AbortError') {
+    return err;
+  }
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  const isNetworkBlock =
+    err instanceof TypeError ||
+    /failed to fetch|load failed|networkerror|fetch/i.test(rawMsg);
+
+  if (!isNetworkBlock) {
+    return err instanceof Error ? err : new Error(rawMsg);
+  }
+
+  const check = inspectHttpsToLocalHttp(endpoint);
+  if (check.isHttpsPage && check.isHttpTarget) {
+    if (check.isPrivateLanOrZero) {
+      return new Error(
+        `浏览器混合内容拦截 (Mixed Content)：当前在线页面为 HTTPS，浏览器严禁请求局域网明文 HTTP 地址 (${endpoint})。` +
+          (check.suggestedLoopbackUrl
+            ? ` 若模型就在本机，请将 Base URL 改为 ${check.suggestedLoopbackUrl.replace(/\/(responses|chat\/completions)$/, '')}；`
+            : '') +
+          ' 若在其他设备，请在本机运行 npm run dev (http://localhost:5173) 或为模型配置 HTTPS 隧道。',
+      );
+    }
+    if (check.isSafari) {
+      return new Error(
+        `Safari 浏览器安全限制：Safari 禁止 HTTPS 在线网页访问本机 HTTP (${endpoint})。请改用 Chrome / Edge 浏览器访问，或在本地运行 npm run dev。`,
+      );
+    }
+    return new Error(
+      `无法从 HTTPS 在线页面连接本机接口 (${endpoint})。请依次检查：① 点击 Chrome/Edge 地址栏左侧图标，允许「本地网络访问 (Local Network Access)」权限；② 在本机模型服务端开启跨域 CORS（例如 Ollama 需设置环境变量 OLLAMA_ORIGINS="*" 后重启，LM Studio 需勾选 Enable CORS，vLLM 需加 --allowed-origins '["*"]'）；③ 确认本机模型服务已启动且端口无误。`,
+    );
+  }
+
+  if (isLocalEndpointUrl(endpoint)) {
+    return new Error(
+      `连接本机模型失败 (${endpoint})：请确认本机模型服务已启动、端口号正确，且已放行浏览器 CORS 跨域（如 Ollama 设置 OLLAMA_ORIGINS="*"、LM Studio 开启 Enable CORS）。原始错误: ${rawMsg}`,
+    );
+  }
+
+  return new Error(`网络请求被拦截或不可达 (${endpoint}): ${rawMsg}`);
+}
 
 async function sendSingleResponsesFetch(
   endpoint: string,
@@ -398,15 +649,17 @@ async function sendSingleResponsesFetch(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey.trim()}`,
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: buildJsonHeaders(apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    throw formatFetchNetworkError(err, endpoint);
+  }
   if (!resp.ok) {
     return { ok: false, status: resp.status, errText: await resp.text() };
   }
@@ -414,12 +667,314 @@ async function sendSingleResponsesFetch(
   if (data.error?.message) {
     return { ok: false, status: 400, errText: data.error.message };
   }
-  return { ok: true, data };
+  return { ok: true, data: { ...data, _protocolUsed: 'responses' } };
+}
+
+function extractInputItemText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const blk of content as Array<{ text?: string }>) {
+    if (typeof blk?.text === 'string' && blk.text) {
+      parts.push(blk.text);
+    }
+  }
+  return parts.join('\n');
+}
+
+function buildChatCompletionsBodyFromResponses(
+  baseBody: Record<string, unknown>,
+  cleanEffort?: string,
+): Record<string, unknown> {
+  const messages: Array<Record<string, unknown>> = [];
+
+  if (typeof baseBody.instructions === 'string' && baseBody.instructions.trim()) {
+    messages.push({ role: 'system', content: baseBody.instructions.trim() });
+  }
+
+  if (typeof baseBody.input === 'string') {
+    messages.push({ role: 'user', content: baseBody.input });
+  } else if (Array.isArray(baseBody.input)) {
+    let pendingReasoning: string[] = [];
+    let pendingText: string[] = [];
+    let pendingToolCalls: Array<{
+      id: string;
+      type: 'function';
+      function: { name: string; arguments: string };
+    }> = [];
+
+    const flushAssistant = () => {
+      if (
+        pendingReasoning.length === 0 &&
+        pendingText.length === 0 &&
+        pendingToolCalls.length === 0
+      ) {
+        return;
+      }
+      const msg: Record<string, unknown> = {
+        role: 'assistant',
+        content:
+          pendingText.length > 0
+            ? pendingText.join('\n')
+            : pendingToolCalls.length > 0
+              ? null
+              : '',
+      };
+      if (pendingReasoning.length > 0) {
+        msg.reasoning_content = pendingReasoning.join('\n');
+      }
+      if (pendingToolCalls.length > 0) {
+        msg.tool_calls = [...pendingToolCalls];
+      }
+      messages.push(msg);
+      pendingReasoning = [];
+      pendingText = [];
+      pendingToolCalls = [];
+    };
+
+    for (const rawItem of baseBody.input as Array<Record<string, unknown>>) {
+      if (!rawItem || typeof rawItem !== 'object') continue;
+      const itemType = String(rawItem.type || '');
+
+      if (itemType === 'reasoning') {
+        if (typeof rawItem.reasoning_content === 'string' && rawItem.reasoning_content.trim()) {
+          pendingReasoning.push(rawItem.reasoning_content.trim());
+        } else if (typeof rawItem.reasoning_text === 'string' && rawItem.reasoning_text.trim()) {
+          pendingReasoning.push(rawItem.reasoning_text.trim());
+        } else if (Array.isArray(rawItem.summary)) {
+          for (const s of rawItem.summary as Array<{ text?: string }>) {
+            if (s?.text?.trim()) pendingReasoning.push(s.text.trim());
+          }
+        }
+        continue;
+      }
+
+      if (itemType === 'function_call') {
+        const callId = String(rawItem.call_id || rawItem.id || `call_${pendingToolCalls.length}`);
+        const fnName = String(rawItem.name || '');
+        if (fnName) {
+          pendingToolCalls.push({
+            id: callId,
+            type: 'function',
+            function: {
+              name: fnName,
+              arguments: ensureValidArgumentsJson(rawItem.arguments),
+            },
+          });
+        }
+        continue;
+      }
+
+      if (itemType === 'function_call_output') {
+        flushAssistant();
+        messages.push({
+          role: 'tool',
+          tool_call_id: String(rawItem.call_id || ''),
+          content: String(rawItem.output ?? ''),
+        });
+        continue;
+      }
+
+      if (itemType === 'message') {
+        const role = String(rawItem.role || 'user');
+        const text = extractInputItemText(rawItem.content);
+        if (role === 'assistant') {
+          if (text) pendingText.push(text);
+        } else {
+          flushAssistant();
+          messages.push({
+            role: role === 'developer' || role === 'system' ? 'system' : 'user',
+            content: text,
+          });
+        }
+      }
+    }
+
+    flushAssistant();
+  }
+
+  const chatBody: Record<string, unknown> = {
+    model: baseBody.model,
+    messages,
+  };
+
+  if (Array.isArray(baseBody.tools) && baseBody.tools.length > 0) {
+    chatBody.tools = (baseBody.tools as Array<Record<string, unknown>>).map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+    if (baseBody.tool_choice === 'auto' || baseBody.tool_choice === 'none') {
+      chatBody.tool_choice = baseBody.tool_choice;
+    }
+  }
+
+  if (typeof baseBody.max_output_tokens === 'number') {
+    chatBody.max_tokens = baseBody.max_output_tokens;
+  }
+
+  if (cleanEffort && cleanEffort !== 'disabled') {
+    chatBody.reasoning_effort = cleanEffort;
+  }
+
+  return chatBody;
+}
+
+interface ChatCompletionsPayload {
+  id?: string;
+  model?: string;
+  error?: { message?: string };
+  choices?: Array<{
+    message?: {
+      content?: string | null;
+      reasoning_content?: string;
+      reasoning?: string;
+      tool_calls?: Array<{
+        id?: string;
+        function?: { name?: string; arguments?: unknown };
+      }>;
+    };
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+}
+
+function convertChatCompletionToResponsesPayload(raw: ChatCompletionsPayload): ResponsesApiPayload {
+  const msg = raw.choices?.[0]?.message;
+  const output: Array<Record<string, unknown>> = [];
+
+  const reasoningParts: string[] = [];
+  const explicitReasoning = msg?.reasoning_content ?? msg?.reasoning;
+  if (typeof explicitReasoning === 'string' && explicitReasoning.trim()) {
+    reasoningParts.push(explicitReasoning.trim());
+  }
+
+  let cleanContent = typeof msg?.content === 'string' ? msg.content : '';
+  if (cleanContent.includes('<think>')) {
+    cleanContent = cleanContent.replace(/<think>([\s\S]*?)<\/think>/gi, (_m, inner: string) => {
+      if (inner?.trim()) reasoningParts.push(inner.trim());
+      return '';
+    });
+  }
+
+  if (reasoningParts.length > 0) {
+    const joinedReasoning = reasoningParts.join('\n');
+    output.push({
+      type: 'reasoning',
+      reasoning_content: joinedReasoning,
+      summary: [{ type: 'summary_text', text: joinedReasoning }],
+    });
+  }
+
+  if (cleanContent.trim()) {
+    output.push({
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: cleanContent.trim() }],
+    });
+  }
+
+  if (Array.isArray(msg?.tool_calls)) {
+    msg.tool_calls.forEach((tc, idx) => {
+      const fnName = tc.function?.name;
+      if (!fnName) return;
+      output.push({
+        type: 'function_call',
+        call_id: tc.id || `call_${Date.now()}_${idx}`,
+        name: fnName,
+        arguments: ensureValidArgumentsJson(tc.function?.arguments),
+      });
+    });
+  }
+
+  return {
+    id: raw.id,
+    model: raw.model,
+    status: 'completed',
+    output_text: cleanContent.trim() || undefined,
+    _protocolUsed: 'chat_completions',
+    output,
+    usage: raw.usage
+      ? {
+          input_tokens: raw.usage.prompt_tokens ?? 0,
+          output_tokens: raw.usage.completion_tokens ?? 0,
+          total_tokens: raw.usage.total_tokens ?? 0,
+          input_tokens_details: raw.usage.prompt_tokens_details,
+          output_tokens_details: raw.usage.completion_tokens_details,
+        }
+      : undefined,
+  };
+}
+
+async function sendChatCompletionsAsResponses(
+  chatEndpoint: string,
+  apiKey: string,
+  baseBody: Record<string, unknown>,
+  signal?: AbortSignal,
+  cleanEffort?: string,
+): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
+  const execFetch = async (bodyObj: Record<string, unknown>) => {
+    let resp: Response;
+    try {
+      resp = await fetch(chatEndpoint, {
+        method: 'POST',
+        headers: buildJsonHeaders(apiKey),
+        body: JSON.stringify(bodyObj),
+        signal,
+      });
+    } catch (err) {
+      throw formatFetchNetworkError(err, chatEndpoint);
+    }
+    if (!resp.ok) {
+      return { ok: false as const, status: resp.status, errText: await resp.text() };
+    }
+    const raw = (await resp.json()) as ChatCompletionsPayload;
+    if (raw.error?.message) {
+      return { ok: false as const, status: 400, errText: raw.error.message };
+    }
+    return { ok: true as const, data: convertChatCompletionToResponsesPayload(raw) };
+  };
+
+  const primaryBody = buildChatCompletionsBodyFromResponses(baseBody, cleanEffort);
+  const firstTry = await execFetch(primaryBody);
+  if (firstTry.ok || !primaryBody.reasoning_effort) {
+    return firstTry;
+  }
+
+  if (firstTry.status === 400 || firstTry.status === 422) {
+    const withoutEffort = { ...primaryBody };
+    delete withoutEffort.reasoning_effort;
+    return await execFetch(withoutEffort);
+  }
+
+  return firstTry;
+}
+
+function shouldFallbackToChatCompletions(status: number, errText: string): boolean {
+  if (status === 404 || status === 405 || status === 501) return true;
+  if (
+    (status === 400 || status === 422) &&
+    /not found|unknown.*route|unsupported.*endpoint|cannot post|unrecognized request url/i.test(
+      errText,
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
- * Sends a `/v1/responses` request passing any custom user-entered `reasoning.effort` string
- * (e.g. `max`, `xhigh`, `high`, `medium`, `low`, `minimal`, `none`, `disabled`, or custom gateway strings!).
+ * Sends a `/v1/responses` request passing any custom user-entered `reasoning.effort` string,
+ * and automatically adapts & falls back to `/v1/chat/completions` when connecting to local models
+ * (Ollama, LM Studio, vLLM, llama.cpp, LocalAI, OneAPI) that don't expose `/v1/responses`!
  */
 export async function postResponsesRequest(
   endpoint: string,
@@ -429,9 +984,42 @@ export async function postResponsesRequest(
   reasoningEffort?: string,
 ): Promise<{ ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }> {
   const cleanEffort = normalizeReasoningEffort(reasoningEffort);
+
+  if (
+    endpoint.endsWith('/chat/completions') ||
+    chatCompletionsFallbackEndpoints.has(endpoint)
+  ) {
+    const chatUrl = deriveChatCompletionsEndpoint(endpoint);
+    return await sendChatCompletionsAsResponses(chatUrl, apiKey, baseBody, signal, cleanEffort);
+  }
+
+  const tryChatFallbackIfUnsupported = async (
+    failedRes: { ok: false; status: number; errText: string },
+  ): Promise<
+    { ok: true; data: ResponsesApiPayload } | { ok: false; status: number; errText: string }
+  > => {
+    if (!shouldFallbackToChatCompletions(failedRes.status, failedRes.errText)) {
+      return failedRes;
+    }
+    const chatUrl = deriveChatCompletionsEndpoint(endpoint);
+    const chatRes = await sendChatCompletionsAsResponses(
+      chatUrl,
+      apiKey,
+      baseBody,
+      signal,
+      cleanEffort,
+    );
+    if (chatRes.ok) {
+      chatCompletionsFallbackEndpoints.add(endpoint);
+      return chatRes;
+    }
+    return failedRes;
+  };
+
   const modelKey = `${endpoint}::${String(baseBody.model ?? '')}`;
   if (!cleanEffort || unsupportedReasoningModels.has(modelKey)) {
-    return await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
+    const r0 = await sendSingleResponsesFetch(endpoint, apiKey, baseBody, signal);
+    return r0.ok ? r0 : await tryChatFallbackIfUnsupported(r0);
   }
 
   const lower = cleanEffort.toLowerCase();
@@ -443,7 +1031,11 @@ export async function postResponsesRequest(
       { ...baseBody, thinking: { type: 'disabled' } },
       signal,
     );
-    if (r1.ok || (r1.status !== 400 && r1.status !== 422)) return r1;
+    if (r1.ok) return r1;
+    if (shouldFallbackToChatCompletions(r1.status, r1.errText)) {
+      return await tryChatFallbackIfUnsupported(r1);
+    }
+    if (r1.status !== 400 && r1.status !== 422) return r1;
     return await sendSingleResponsesFetch(
       endpoint,
       apiKey,
@@ -459,7 +1051,11 @@ export async function postResponsesRequest(
       { ...baseBody, reasoning: { effort: 'none' } },
       signal,
     );
-    if (r1.ok || (r1.status !== 400 && r1.status !== 422)) return r1;
+    if (r1.ok) return r1;
+    if (shouldFallbackToChatCompletions(r1.status, r1.errText)) {
+      return await tryChatFallbackIfUnsupported(r1);
+    }
+    if (r1.status !== 400 && r1.status !== 422) return r1;
     if (/reasoning|effort|none|unsupported|unknown|invalid/i.test(r1.errText)) {
       const r2 = await sendSingleResponsesFetch(
         endpoint,
@@ -480,6 +1076,9 @@ export async function postResponsesRequest(
     signal,
   );
   if (rCustom.ok) return rCustom;
+  if (shouldFallbackToChatCompletions(rCustom.status, rCustom.errText)) {
+    return await tryChatFallbackIfUnsupported(rCustom);
+  }
 
   // Only fallback without `reasoning` if the model doesn't recognize the `reasoning` parameter at all
   if (
@@ -512,15 +1111,17 @@ export async function testLlmEndpointConnection(
   );
   const latencyMs = Math.round(performance.now() - started);
   if (!res.ok) {
-    throw new Error(`Responses API HTTP ${res.status}: ${res.errText.slice(0, 200)}`);
+    throw new Error(`API HTTP ${res.status}: ${res.errText.slice(0, 200)}`);
   }
   const parsed = parseResponsesPayload(res.data);
   const reply = parsed.assistantText || 'OK';
   const effortTag = formatReasoningEffortTag(config.reasoningEffort);
+  const protoLabel =
+    res.data._protocolUsed === 'chat_completions' ? '自动适配 /chat/completions' : '/responses';
   return {
     ok: true,
     latencyMs,
-    message: `外卖员模型连通成功 (${res.data.model || config.model} · 思考:${effortTag}, ${latencyMs}ms): "${reply}"`,
+    message: `外卖员模型连通成功 (${res.data.model || config.model} · ${protoLabel} · 思考:${effortTag}, ${latencyMs}ms): "${reply}"`,
   };
 }
 
@@ -682,7 +1283,7 @@ export async function runAutonomousArenaRound(
   signal: AbortSignal,
   onProgress: (statusText: string) => void,
 ): Promise<Omit<AgentChatMessage, 'id'>> {
-  if (llmConfig.enabled && llmConfig.apiKey.trim()) {
+  if (isLlmConfigReady(llmConfig)) {
     const blindMode = nexusStore.getState().benchmarkBlindMode;
     const autoPrompt = blindMode
       ? '【硬核盲测自动回合】请主动调用 WebMCP 工具获取状态并自主推进本回合最优的 1~4 步工具行动。'
@@ -837,8 +1438,8 @@ export async function runNaturalLanguageWebMCPTurn(
 ): Promise<Omit<AgentChatMessage, 'id'>> {
   const turnToolLogs: TurnToolCallLog[] = [];
 
-  // Mode A: Rider Player Model via OpenAI Responses API (`POST /v1/responses`)
-  if (llmConfig.enabled && llmConfig.apiKey.trim()) {
+  // Mode A: Rider Player Model via OpenAI Responses API (`POST /v1/responses` or `/v1/chat/completions` fallback)
+  if (isLlmConfigReady(llmConfig)) {
     const endpoint = resolveResponsesEndpoint(llmConfig.baseUrl);
     const effort = llmConfig.reasoningEffort ?? 'default';
     const effortTag = formatReasoningEffortTag(effort);

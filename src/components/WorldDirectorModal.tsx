@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  AlertTriangle,
   Bot,
   Check,
   CheckCircle2,
@@ -9,6 +10,7 @@ import {
   Eye,
   EyeOff,
   Globe2,
+  Laptop,
   Loader2,
   PlusCircle,
   RefreshCw,
@@ -20,8 +22,13 @@ import {
 } from 'lucide-react';
 import { nexusStore, useNexusStore } from '../store/nexusStore';
 import {
+  inspectHttpsToLocalHttp,
+  isLlmConfigReady,
+  isLocalEndpointUrl,
   type LlmConnectionConfig,
+  normalizeBaseUrlInput,
   REASONING_EFFORT_SUGGESTIONS,
+  requiresExplicitApiKey,
   resolveResponsesEndpoint,
   testLlmEndpointConnection,
 } from '../webmcp/agentPlaybooks';
@@ -49,7 +56,68 @@ const MODEL_PRESETS = [
   { id: 'openai-o4-mini', label: 'o4-mini (推理)', baseUrl: 'https://api.openai.com/v1', model: 'o4-mini' },
   { id: 'openai-4.1', label: 'GPT-4.1 (强导演)', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4.1' },
   { id: 'ark-responses', label: '火山方舟 /responses', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-1-6-250615' },
+  { id: 'local-ollama', label: '🖥 Ollama 本机', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen3:8b' },
+  { id: 'local-lmstudio', label: '🖥 LM Studio 本机', baseUrl: 'http://127.0.0.1:1234/v1', model: 'local-model' },
+  { id: 'local-vllm', label: '🖥 vLLM / 本机网关', baseUrl: 'http://127.0.0.1:8000/v1', model: 'local-model' },
 ];
+
+const LocalEndpointNotice: React.FC<{
+  baseUrl: string;
+  onApplyUrl: (nextUrl: string) => void;
+}> = ({ baseUrl, onApplyUrl }) => {
+  if (!isLocalEndpointUrl(baseUrl) && !/0\.0\.0\.0/.test(baseUrl)) {
+    return null;
+  }
+  const check = inspectHttpsToLocalHttp(baseUrl);
+  const blockedByMixedContent = check.isHttpsPage && check.isHttpTarget && check.isPrivateLanOrZero;
+  const blockedBySafari = check.isHttpsPage && check.isHttpTarget && check.isSafari;
+
+  return (
+    <div
+      className={`mt-1.5 space-y-1.5 rounded-lg border p-2.5 text-[11px] leading-relaxed ${
+        blockedByMixedContent || blockedBySafari
+          ? 'border-rose-500/50 bg-rose-950/35 text-rose-200'
+          : 'border-sky-500/35 bg-sky-950/25 text-slate-300'
+      }`}
+    >
+      {blockedByMixedContent ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 font-semibold text-rose-200">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+            HTTPS 在线网页禁止访问局域网或 0.0.0.0 明文 HTTP（浏览器混合内容拦截）！
+          </span>
+          {check.suggestedLoopbackUrl && (
+            <button
+              type="button"
+              onClick={() => onApplyUrl(check.suggestedLoopbackUrl!)}
+              className="rounded-md bg-rose-500 px-2.5 py-0.5 font-mono text-[11px] font-bold text-white hover:bg-rose-400"
+            >
+              一键改为本机 127.0.0.1
+            </button>
+          )}
+        </div>
+      ) : blockedBySafari ? (
+        <div className="flex items-center gap-1.5 font-semibold text-rose-200">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+          Safari 禁止 HTTPS 网页请求本机 HTTP：请改用 Chrome / Edge 浏览器，或在本地运行 npm run dev。
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5 font-semibold text-sky-300">
+          <Laptop className="h-3.5 w-3.5 shrink-0" />
+          已识别为本机模型接口：API Key 可留空，自动兼容 /v1/responses 与 /v1/chat/completions
+        </div>
+      )}
+
+      {check.isHttpsPage && check.isHttpTarget && (
+        <div className="text-[10.5px] text-slate-300/90">
+          在发布后的 <code>https://</code> 网页连接本机 <code>127.0.0.1</code> / <code>localhost</code> 需满足浏览器安全策略：
+          ① 使用 <b>Chrome / Edge</b> 并在地址栏左侧站点权限允许<b>「本地网络访问 (Local Network Access)」</b>；
+          ② 本机模型开启 <b>CORS 跨域</b>（Ollama 需设环境变量 <code>OLLAMA_ORIGINS=&quot;*&quot;</code> 后重启；LM Studio 勾选 <code>Enable CORS</code>；vLLM 加 <code>--allowed-origins &apos;[&quot;*&quot;]&apos;</code>）。
+        </div>
+      )}
+    </div>
+  );
+};
 
 const WORLD_THEME_CHIPS = [
   '重庆洪崖洞·8D魔幻山城夜宵局',
@@ -213,7 +281,12 @@ export const WorldDirectorModal: React.FC<Props> = ({
 
   const handleTestWorld = async () => {
     if (worldBusy) return;
-    setWorldBusy('正在测试世界导演 /responses 接口连通性...');
+    const normalizedUrl = normalizeBaseUrlInput(worldCfg.baseUrl) || worldCfg.baseUrl;
+    if (normalizedUrl !== worldCfg.baseUrl) {
+      worldModelStore.update({ baseUrl: normalizedUrl });
+    }
+    setWorldBusy('正在测试世界导演模型连通性 (/responses 或自动回退 /chat/completions)...');
+    setWorldFeedback(null);
     try {
       const msg = await testWorldModelConnection();
       setWorldFeedback({ ok: true, text: msg });
@@ -225,15 +298,26 @@ export const WorldDirectorModal: React.FC<Props> = ({
   };
 
   const handleTestRider = async () => {
-    if (!riderLlmConfig.apiKey.trim()) {
-      setRiderFeedback({ ok: false, text: '请先填入外卖员模型 API Key' });
+    const normalizedUrl = normalizeBaseUrlInput(riderLlmConfig.baseUrl) || riderLlmConfig.baseUrl;
+    const effectiveConfig: LlmConnectionConfig = {
+      ...riderLlmConfig,
+      baseUrl: normalizedUrl,
+    };
+    if (normalizedUrl !== riderLlmConfig.baseUrl) {
+      onChangeRiderLlm((c) => ({ ...c, baseUrl: normalizedUrl }));
+    }
+    if (requiresExplicitApiKey(effectiveConfig.baseUrl) && !effectiveConfig.apiKey.trim()) {
+      setRiderFeedback({
+        ok: false,
+        text: '当前云端接口需要填写 API Key（若连接本机 Ollama / LM Studio / vLLM，请将 Base URL 改为 http://127.0.0.1:端口/v1 后即可免填 Key）',
+      });
       return;
     }
     setRiderTesting(true);
     setRiderFeedback(null);
     try {
-      const res = await testLlmEndpointConnection(riderLlmConfig);
-      onChangeRiderLlm((c) => ({ ...c, enabled: true }));
+      const res = await testLlmEndpointConnection(effectiveConfig);
+      onChangeRiderLlm((c) => ({ ...c, baseUrl: normalizedUrl, enabled: true }));
       setRiderFeedback({ ok: true, text: res.message });
     } catch (err) {
       setRiderFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
@@ -242,8 +326,8 @@ export const WorldDirectorModal: React.FC<Props> = ({
     }
   };
 
-  const worldActive = worldCfg.enabled && Boolean(worldCfg.apiKey.trim());
-  const riderActive = riderLlmConfig.enabled && Boolean(riderLlmConfig.apiKey.trim());
+  const worldActive = isLlmConfigReady(worldCfg);
+  const riderActive = isLlmConfigReady(riderLlmConfig);
 
   return (
     <div
@@ -619,9 +703,9 @@ export const WorldDirectorModal: React.FC<Props> = ({
                 </div>
 
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                  <label className="space-y-1 sm:col-span-2">
+                  <div className="space-y-1 sm:col-span-2">
                     <div className="flex justify-between text-[11px] text-slate-400">
-                      <span>世界模型 Base URL</span>
+                      <span>世界模型 Base URL（支持云端或本机 http://127.0.0.1:端口/v1）</span>
                       <span className="font-mono text-indigo-300">
                         POST {resolveResponsesEndpoint(worldCfg.baseUrl)}
                       </span>
@@ -632,12 +716,27 @@ export const WorldDirectorModal: React.FC<Props> = ({
                       onChange={(e) =>
                         worldModelStore.update({ providerPreset: 'custom', baseUrl: e.target.value })
                       }
+                      onBlur={() => {
+                        const norm = normalizeBaseUrlInput(worldCfg.baseUrl);
+                        if (norm && norm !== worldCfg.baseUrl) {
+                          worldModelStore.update({ baseUrl: norm });
+                        }
+                      }}
+                      placeholder="如 https://api.openai.com/v1 或 http://127.0.0.1:11434/v1"
                       className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-slate-100"
                     />
-                  </label>
+                    <LocalEndpointNotice
+                      baseUrl={worldCfg.baseUrl}
+                      onApplyUrl={(nextUrl) =>
+                        worldModelStore.update({ providerPreset: 'custom', baseUrl: nextUrl })
+                      }
+                    />
+                  </div>
 
                   <label className="space-y-1">
-                    <span className="text-[11px] text-slate-400">世界模型 API Key</span>
+                    <span className="text-[11px] text-slate-400">
+                      世界模型 API Key {isLocalEndpointUrl(worldCfg.baseUrl) ? '(本机可留空)' : ''}
+                    </span>
                     <div className="relative">
                       <input
                         type={showWorldKey ? 'text' : 'password'}
@@ -649,7 +748,11 @@ export const WorldDirectorModal: React.FC<Props> = ({
                             enabled: v.trim() ? true : worldCfg.enabled,
                           });
                         }}
-                        placeholder="sk-... (与外卖员模型完全独立)"
+                        placeholder={
+                          isLocalEndpointUrl(worldCfg.baseUrl)
+                            ? '本机模型无需 API Key，可直接留空测试'
+                            : 'sk-... (与外卖员模型完全独立)'
+                        }
                         className="w-full rounded-lg border border-slate-700 bg-slate-900 py-1.5 pl-3 pr-8 font-mono text-slate-100"
                       />
                       <button
@@ -731,13 +834,26 @@ export const WorldDirectorModal: React.FC<Props> = ({
                   </button>
                   <button
                     type="button"
+                    disabled={Boolean(worldBusy)}
                     onClick={() => void handleTestWorld()}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 font-semibold text-white hover:bg-slate-700"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
                   >
                     <Wifi className="h-3.5 w-3.5 text-indigo-400" />
-                    测试世界模型 /responses
+                    测试世界模型连通性
                   </button>
                 </div>
+
+                {worldFeedback && (
+                  <div
+                    className={`rounded-lg border p-2.5 ${
+                      worldFeedback.ok
+                        ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                        : 'border-rose-500/40 bg-rose-950/30 text-rose-200'
+                    }`}
+                  >
+                    {worldFeedback.text}
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -753,7 +869,7 @@ export const WorldDirectorModal: React.FC<Props> = ({
                     }
                     className="accent-amber-500"
                   />
-                  <span>启用真实「外卖员玩家大模型」(/v1/responses + WebMCP 工具调用)</span>
+                  <span>启用真实「外卖员玩家大模型」(/v1/responses · 自动兼容 /chat/completions)</span>
                 </label>
                 <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400">
                   <CheckCircle2 className="h-3.5 w-3.5" />
@@ -786,9 +902,9 @@ export const WorldDirectorModal: React.FC<Props> = ({
               </div>
 
               <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                <label className="space-y-1 sm:col-span-2">
+                <div className="space-y-1 sm:col-span-2">
                   <div className="flex justify-between text-[11px] text-slate-400">
-                    <span>外卖员模型 Base URL</span>
+                    <span>外卖员模型 Base URL（支持云端或本机 http://127.0.0.1:端口/v1）</span>
                     <span className="font-mono text-amber-300">
                       POST {resolveResponsesEndpoint(riderLlmConfig.baseUrl)}
                     </span>
@@ -803,12 +919,31 @@ export const WorldDirectorModal: React.FC<Props> = ({
                         baseUrl: e.target.value,
                       }))
                     }
+                    onBlur={() => {
+                      const norm = normalizeBaseUrlInput(riderLlmConfig.baseUrl);
+                      if (norm && norm !== riderLlmConfig.baseUrl) {
+                        onChangeRiderLlm((c) => ({ ...c, baseUrl: norm }));
+                      }
+                    }}
+                    placeholder="如 https://api.openai.com/v1 或 http://127.0.0.1:11434/v1"
                     className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-slate-100"
                   />
-                </label>
+                  <LocalEndpointNotice
+                    baseUrl={riderLlmConfig.baseUrl}
+                    onApplyUrl={(nextUrl) =>
+                      onChangeRiderLlm((c) => ({
+                        ...c,
+                        providerPreset: 'custom',
+                        baseUrl: nextUrl,
+                      }))
+                    }
+                  />
+                </div>
 
                 <label className="space-y-1">
-                  <span className="text-[11px] text-slate-400">外卖员模型 API Key</span>
+                  <span className="text-[11px] text-slate-400">
+                    外卖员模型 API Key {isLocalEndpointUrl(riderLlmConfig.baseUrl) ? '(本机可留空)' : ''}
+                  </span>
                   <div className="relative">
                     <input
                       type={showRiderKey ? 'text' : 'password'}
@@ -821,7 +956,11 @@ export const WorldDirectorModal: React.FC<Props> = ({
                           enabled: v.trim() ? true : c.enabled,
                         }));
                       }}
-                      placeholder="sk-... (专用于骑手 AI 决策)"
+                      placeholder={
+                        isLocalEndpointUrl(riderLlmConfig.baseUrl)
+                          ? '本机模型无需 API Key，可直接留空测试'
+                          : 'sk-... (专用于骑手 AI 决策)'
+                      }
                       className="w-full rounded-lg border border-slate-700 bg-slate-900 py-1.5 pl-3 pr-8 font-mono text-slate-100"
                     />
                     <button

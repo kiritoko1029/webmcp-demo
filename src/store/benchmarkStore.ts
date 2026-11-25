@@ -6,6 +6,7 @@ import type {
   RiderProfile,
   WorldMapConfig,
 } from '../types/domain';
+import { isLlmConfigReady } from '../webmcp/agentPlaybooks';
 import type { ResponseUsageMetrics } from '../webmcp/responsesSessionManager';
 import {
   buildHardTelemetryReport,
@@ -628,7 +629,7 @@ export const benchmarkStore = {
     // Background helper to upgrade judge report via World Director LLM if enabled
     const tryUpgradeWithWorldLlm = async (targetId: string, updateToken?: string) => {
       const wCfg = worldModelStore.getState();
-      if (!wCfg.enabled || !wCfg.apiKey.trim()) return;
+      if (!isLlmConfigReady(wCfg)) return;
       try {
         const curRec = mergedSnapshot.find((r) => r.id === targetId);
         if (!curRec?.runReport) return;
